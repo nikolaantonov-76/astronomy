@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Variable-star minima calculator with VSX lookup."""
 
 from __future__ import annotations
