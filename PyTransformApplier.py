@@ -1,3 +1,15 @@
+"""
+Apply BV/BVR transformation coefficients to AAVSO Extended File Format exports and save transformed outputs.
+
+Usage:
+1. Run: `python astronomy/PyTransformApplier.py`
+2. Select BV or BVR mode and provide B/V(/R) files plus the `VPhot.ini` coefficients file.
+3. Click `Execute` to create transformed `.xlsx`, `.txt`, and light-curve `.png` files.
+
+Author: Nikola Antonov
+Email: nikola.antonov@iaps.institute
+"""
+
 import configparser
 import math
 import re
@@ -13,6 +25,7 @@ aij_columns = [
     "Name", "DATE", "MAG", "MERR", "FILT", "TRANS", "MTYPE",
     "CNAME", "CMAG", "KNAME", "KMAG", "AMASS", "GROUP", "CHART", "NOTES",
 ]
+UI_SETTINGS_FILE = Path("PyTransformApplier.settings.ini")
 
 
 def parse_notes_column(df):
@@ -30,9 +43,9 @@ def parse_notes_column(df):
 
 def load_aij_file(filepath):
     df = pd.read_csv(filepath, names=aij_columns, comment="#")
-    # DATE трябва да е число (JD) за аритметика при намиране на най-близък кадър
+    # DATE must be numeric (JD) to compute nearest-frame matches
     df["DATE"] = pd.to_numeric(df["DATE"], errors="coerce")
-    # Премахване на евентуални интервали от FILT след CSV парсване
+    # Remove potential trailing/leading spaces in FILT after CSV parsing
     df["FILT"] = df["FILT"].astype(str).str.strip()
     df = parse_notes_column(df)
     df["Err"] = pd.to_numeric(df["MERR"], errors="coerce")
@@ -41,6 +54,7 @@ def load_aij_file(filepath):
 
 def load_transform_coeffs(ini_file):
     config = configparser.ConfigParser()
+    config.optionxform = str
     config.read(ini_file)
     return {
         "Tbv":   float(config["Coefficients"]["Tbv"]),
@@ -54,8 +68,8 @@ def load_transform_coeffs(ini_file):
 
 def find_nearest(df_ref, target_date, max_minutes):
     """
-    Връща най-близкия ред от df_ref до target_date.
-    Ако разликата надвишава max_minutes, връща (None, diff_minutes).
+    Return the nearest row in df_ref to target_date.
+    If the time gap is above max_minutes, return (None, diff_minutes).
     """
     diffs = (df_ref["DATE"] - target_date).abs()
     idx = diffs.idxmin()
@@ -104,8 +118,8 @@ def iterative_transform_bv(df_b, df_v, coeffs, max_minutes, warnings):
         b_match, diff = find_nearest(df_b_only, v["DATE"], max_minutes)
         if b_match is None:
             warnings.append(
-                f"V кадър JD={v['DATE']:.6f}: няма B кадър в рамките на {max_minutes} мин "
-                f"(най-близкият е {diff:.1f} мин) — записан НЕТРАНСФОРМИРАН"
+                f"V frame JD={v['DATE']:.6f}: no B frame within {max_minutes} min "
+                f"(nearest is {diff:.1f} min) - saved as UNTRANSFORMED"
             )
             row = v.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
             results.append(row); continue
@@ -126,8 +140,8 @@ def iterative_transform_bv(df_b, df_v, coeffs, max_minutes, warnings):
         v_match, diff = find_nearest(df_v_only, b["DATE"], max_minutes)
         if v_match is None:
             warnings.append(
-                f"B кадър JD={b['DATE']:.6f}: няма V кадър в рамките на {max_minutes} мин "
-                f"(най-близкият е {diff:.1f} мин) — записан НЕТРАНСФОРМИРАН"
+                f"B frame JD={b['DATE']:.6f}: no V frame within {max_minutes} min "
+                f"(nearest is {diff:.1f} min) - saved as UNTRANSFORMED"
             )
             row = b.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
             results.append(row); continue
@@ -157,8 +171,8 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
         b_match, diff = find_nearest(df_b_only, v["DATE"], max_minutes)
         if b_match is None:
             warnings.append(
-                f"V кадър JD={v['DATE']:.6f}: няма B кадър в рамките на {max_minutes} мин "
-                f"(най-близкият е {diff:.1f} мин) — записан НЕТРАНСФОРМИРАН"
+                f"V frame JD={v['DATE']:.6f}: no B frame within {max_minutes} min "
+                f"(nearest is {diff:.1f} min) - saved as UNTRANSFORMED"
             )
             row = v.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
             results.append(row); continue
@@ -179,8 +193,8 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
         v_match, diff = find_nearest(df_v_only, b["DATE"], max_minutes)
         if v_match is None:
             warnings.append(
-                f"B кадър JD={b['DATE']:.6f}: няма V кадър в рамките на {max_minutes} мин "
-                f"(най-близкият е {diff:.1f} мин) — записан НЕТРАНСФОРМИРАН"
+                f"B frame JD={b['DATE']:.6f}: no V frame within {max_minutes} min "
+                f"(nearest is {diff:.1f} min) - saved as UNTRANSFORMED"
             )
             row = b.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
             results.append(row); continue
@@ -203,11 +217,11 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
 
         if v_match is None or b_match is None:
             missing = []
-            if v_match is None: missing.append(f"V ({v_diff:.1f} мин)")
-            if b_match is None: missing.append(f"B ({b_diff:.1f} мин)")
+            if v_match is None: missing.append(f"V ({v_diff:.1f} min)")
+            if b_match is None: missing.append(f"B ({b_diff:.1f} min)")
             warnings.append(
-                f"R кадър JD={r['DATE']:.6f}: няма {' и '.join(missing)} кадър в рамките на "
-                f"{max_minutes} мин — записан НЕТРАНСФОРМИРАН"
+                f"R frame JD={r['DATE']:.6f}: no {' and '.join(missing)} frame within "
+                f"{max_minutes} min - saved as UNTRANSFORMED"
             )
             row = r.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
             results.append(row); continue
@@ -247,7 +261,7 @@ def save_to_excel(df, output_path):
 
 
 def obs_date_from_df(df):
-    """Връща датата на наблюдението (Europe/Sofia) от минималния JD в серията."""
+    """Return observation date (Europe/Sofia) from the minimum JD in the series."""
     from datetime import timedelta
     min_jd = float(df["DATE"].min())
     unix_ts = (min_jd - 2440587.5) * 86400.0
@@ -321,7 +335,7 @@ def run_transform(scenario, b_file, v_file, r_file, ini_file, max_minutes):
     if df_transformed.empty:
         raise ValueError("No transformed data was produced.")
 
-    # Всички изходни файлове използват датата на наблюдението от първия кадър
+    # All output files use the observation date derived from the first frame
     object_name = str(df_transformed["Name"].dropna().unique()[0]).replace(" ", "_")
     obs_date = obs_date_from_df(df_transformed)
     output_excel = f"{object_name}_{obs_date}_{filters}.xlsx"
@@ -345,8 +359,12 @@ class SettingsDialog(tk.Tk):
         self.r_file_var      = tk.StringVar(value="R.txt")
         self.ini_file_var    = tk.StringVar(value="VPhot.ini")
         self.max_minutes_var = tk.StringVar(value="15")
+        self.coeffs_status_var = tk.StringVar(value="Coefficients: not loaded")
+        self.coeffs_table = None
 
         self._build_ui()
+        self._load_saved_settings()
+        self._refresh_coefficients_table()
         self._toggle_r_controls()
 
     def _build_ui(self):
@@ -365,15 +383,39 @@ class SettingsDialog(tk.Tk):
         self._add_file_row(frame, 2, "V file", self.v_file_var)
         self.r_entry, self.r_button = self._add_file_row(frame, 3, "R file", self.r_file_var)
         self._add_file_row(frame, 4, "INI file", self.ini_file_var)
+        ttk.Button(frame, text="Save INI", command=self._save_ini_setting).grid(
+            row=4, column=3, sticky="w", pady=4
+        )
 
         ttk.Label(frame, text="Max match (min)").grid(row=5, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.max_minutes_var, width=12).grid(
             row=5, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="Кадри извън прага → TRANS=NO", foreground="#777777").grid(
+        ttk.Label(frame, text="Frames outside threshold -> TRANS=NO", foreground="#777777").grid(
             row=5, column=2, sticky="w", padx=(8, 0))
 
+        ttk.Label(frame, text="Loaded coefficients").grid(row=6, column=0, sticky="nw", pady=(10, 4))
+        table_frame = ttk.Frame(frame)
+        table_frame.grid(row=6, column=1, columnspan=3, sticky="we", pady=(10, 4))
+        columns = ("coefficient", "value", "error", "r2")
+        self.coeffs_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=8)
+        self.coeffs_table.heading("coefficient", text="Coefficient")
+        self.coeffs_table.heading("value", text="Value")
+        self.coeffs_table.heading("error", text="Error")
+        self.coeffs_table.heading("r2", text="R²")
+        self.coeffs_table.column("coefficient", width=130, anchor="w")
+        self.coeffs_table.column("value", width=90, anchor="e")
+        self.coeffs_table.column("error", width=90, anchor="e")
+        self.coeffs_table.column("r2", width=90, anchor="e")
+        self.coeffs_table.grid(row=0, column=0, sticky="nsew")
+        table_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.coeffs_table.yview)
+        self.coeffs_table.configure(yscrollcommand=table_scroll.set)
+        table_scroll.grid(row=0, column=1, sticky="ns")
+        ttk.Label(frame, textvariable=self.coeffs_status_var, foreground="#666666").grid(
+            row=7, column=1, columnspan=3, sticky="w"
+        )
+
         ttk.Button(frame, text="Execute", command=self._execute).grid(
-            row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+            row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
     def _add_file_row(self, parent, row, label, variable):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
@@ -390,6 +432,78 @@ class SettingsDialog(tk.Tk):
         )
         if selected:
             target_var.set(selected)
+            if target_var is self.ini_file_var:
+                self._refresh_coefficients_table()
+
+    def _refresh_coefficients_table(self):
+        for row_id in self.coeffs_table.get_children():
+            self.coeffs_table.delete(row_id)
+
+        ini_path = self.ini_file_var.get().strip()
+        if not ini_path:
+            self.coeffs_status_var.set("Coefficients: no INI file selected")
+            return
+        if not Path(ini_path).is_file():
+            self.coeffs_status_var.set("Coefficients: INI file not found")
+            return
+
+        try:
+            config = configparser.ConfigParser()
+            config.optionxform = str
+            config.read(ini_path, encoding="utf-8")
+            coeffs = dict(config.items("Coefficients"))
+            errors = dict(config.items("Error")) if config.has_section("Error") else {}
+            r2_vals = (
+                dict(config.items("R Squared Values"))
+                if config.has_section("R Squared Values")
+                else {}
+            )
+
+            for key, coeff_raw in coeffs.items():
+                coeff_val = float(coeff_raw)
+                err_raw = errors.get(key, "")
+                r2_raw = r2_vals.get(key, "")
+                err_val = f"{float(err_raw):.3f}" if err_raw.strip() else "n/a"
+                r2_val = f"{float(r2_raw):.3f}" if r2_raw.strip() else "n/a"
+                self.coeffs_table.insert(
+                    "",
+                    "end",
+                    values=(key, f"{coeff_val:.3f}", err_val, r2_val),
+                )
+
+            self.coeffs_status_var.set(f"Coefficients loaded from: {ini_path}")
+        except Exception as exc:
+            self.coeffs_status_var.set(f"Coefficients: failed to parse INI ({exc})")
+
+    def _load_saved_settings(self):
+        if not UI_SETTINGS_FILE.is_file():
+            return
+        config = configparser.ConfigParser()
+        try:
+            config.read(UI_SETTINGS_FILE, encoding="utf-8")
+            saved_ini = config.get("Settings", "ini_file", fallback="").strip()
+            if saved_ini:
+                self.ini_file_var.set(saved_ini)
+                self._refresh_coefficients_table()
+        except Exception:
+            # Ignore settings read errors and keep defaults.
+            return
+
+    def _save_ini_setting(self):
+        ini_path = self.ini_file_var.get().strip()
+        if not ini_path:
+            messagebox.showerror("Invalid input", "INI file path is empty.")
+            return
+
+        config = configparser.ConfigParser()
+        config["Settings"] = {"ini_file": ini_path}
+        try:
+            with open(UI_SETTINGS_FILE, "w", encoding="utf-8") as f:
+                config.write(f)
+            self._refresh_coefficients_table()
+            messagebox.showinfo("Saved", f"INI setting saved to:\n{UI_SETTINGS_FILE}")
+        except Exception as exc:
+            messagebox.showerror("Save failed", str(exc))
 
     def _toggle_r_controls(self):
         state = "normal" if self.scenario_var.get() == "BVR" else "disabled"
@@ -408,7 +522,7 @@ class SettingsDialog(tk.Tk):
             if max_minutes <= 0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Invalid input", "Max match трябва да е положително число (в минути).")
+            messagebox.showerror("Invalid input", "Max match must be a positive number (in minutes).")
             return
 
         required_paths = {"B file": b_file, "V file": v_file, "INI file": ini_file}
@@ -433,7 +547,7 @@ class SettingsDialog(tk.Tk):
 
         msg = f"Scenario: {scenario}\nSaved:\n- {output_excel}\n- {output_txt}\n- {output_plot}"
         if warns:
-            msg += f"\n\n⚠️  {len(warns)} кадър(а) записани НЕТРАНСФОРМИРАНИ:\n"
+            msg += f"\n\nWarning: {len(warns)} frame(s) saved as UNTRANSFORMED:\n"
             msg += "\n".join(f"• {w}" for w in warns)
         messagebox.showinfo("Done", msg)
 
