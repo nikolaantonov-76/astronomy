@@ -1,3 +1,7 @@
+"""
+Generate AAVSO Extended Format reports from AstroImageJ (AIJ) photometry data.
+"""
+
 import pandas as pd
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
@@ -12,19 +16,19 @@ from tkinter.scrolledtext import ScrolledText
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.image as mpimg
 
-# --- КОНФИГУРАЦИЯ ---
+# --- CONFIGURATION ---
 STAR_NAME = "KR Aur"
 FILTER = "V"
 OBSERVER_CODE = "ANNA"
 INPUT_TBL_FILE = "KR Aur 2026-02-18 V.tbl"
 CHART_ID = "X40996ANY"
 
-# --- Конфигурация на звездите ---
+# --- Star configuration ---
 SINGLE_COMP_TBL_ID = "na"
 SINGLE_COMP_AAVSO_NAME = "ENSEMBLE"
 COMP_STAR_STD_MAG_ERR = 0.05
 
-# --- Конфигурация на контролната звезда ---
+# --- Check-star configuration ---
 CHECK_STAR_TBL_ID = "T4"
 CHECK_STAR_AAVSO_NAME = "133"
 CHECK_STAR_STD_MAG = 13.308
@@ -32,7 +36,7 @@ CHECK_STAR_STD_MAG_ERR = 0.029
 
 TRANSFORMED = "NO"
 
-# --- КРАЙ НА КОНФИГУРАЦИЯТА ---
+# --- END CONFIGURATION ---
 
 
 def _to_float_or_none(value):
@@ -69,10 +73,10 @@ def _series_local_date_str_from_min_jd(df, tz_name="Europe/Sofia"):
 
 def get_instrumental_mag(row, obj_id):
     """
-    Пресмята инструменталната звездна величина, нормализирана по времето
-    на експозиция — идентично с конвенцията на VPhot:
+    Compute instrumental magnitude normalized by exposure time,
+    following the VPhot convention:
         m_inst = -2.5 * log10(flux / EXPTIME)
-    Ако EXPTIME липсва или е 0, се използва ZP=0 без нормализация.
+    If EXPTIME is missing or 0, use an unnormalized ZP=0 fallback.
     """
     flux_col = f"Source-Sky_{obj_id}"
     if flux_col not in row or pd.isna(row[flux_col]):
@@ -86,7 +90,7 @@ def get_instrumental_mag(row, obj_id):
     if exptime and exptime > 0:
         return -2.5 * math.log10(flux_val / exptime)
     else:
-        # Fallback: без нормализация (ZP=0)
+        # Fallback: unnormalized (ZP=0)
         return -2.5 * math.log10(flux_val)
 
 
@@ -98,7 +102,7 @@ def build_notes_string(row, single_comp_id, check_id, check_std_mag, comp_err, c
     kmag_measured = _to_float_or_none(row.get(f"Source_AMag_{check_id}", None))
     kmag_ins = get_instrumental_mag(row, check_id)
     if kmag_measured is not None:
-        parts.append(f"|KMAG={kmag_measured:.3f}")
+        parts.append(f"|KMAGSTD={kmag_measured:.3f}")
     if kmag_ins is not None:
         parts.append(f"|KMAGINS={kmag_ins:.3f}")
     if check_std_mag is not None:
@@ -119,9 +123,9 @@ def build_notes_string(row, single_comp_id, check_id, check_std_mag, comp_err, c
             key=lambda x: int(x[1:])
         )
 
-        # CMAGINS = -2.5 * log10(сумарен поток на ансамбъла / EXPTIME)
-        # Това е физически коректно: ансамбълът се третира като една звезда
-        # с обединен поток, идентично с начина, по който AIJ го изчислява вътрешно.
+        # CMAGINS = -2.5 * log10(total ensemble flux / EXPTIME)
+        # Physically correct: the ensemble is treated as a single star
+        # with combined flux, matching AIJ's internal calculation.
         exptime = _to_float_or_none(row.get("EXPTIME", None))
         total_flux = 0.0
         for cid in comp_ids:
@@ -163,7 +167,7 @@ def build_notes_string(row, single_comp_id, check_id, check_std_mag, comp_err, c
 
 def plot_light_curve(df, star_name, filt, check_star_id, check_star_name):
     if df.empty or len(df) < 2:
-        print("Няма достатъчно данни за генериране на графика.")
+        print("Not enough data to generate the plot.")
         return None
 
     filter_colors = {'U': 'darkviolet', 'B': 'blue', 'V': 'green', 'R': 'red'}
@@ -216,7 +220,7 @@ def plot_light_curve(df, star_name, filt, check_star_id, check_star_name):
 
     plt.savefig(plot_filename, dpi=300)
     plt.close(fig)
-    print(f"📈 Успешно създадена графика: '{plot_filename}'")
+    print(f"Plot created successfully: '{plot_filename}'")
     return plot_filename
 
 
@@ -228,7 +232,7 @@ def create_aavso_report(input_file, star_name, filt, obs_code,
     try:
         df = pd.read_csv(input_file, sep='\t')
     except Exception as e:
-        print(f"ГРЕШКА при четене на файла: {e}")
+        print(f"Error reading file: {e}")
         return None, None, []
 
     if not check_star_id:
@@ -240,7 +244,7 @@ def create_aavso_report(input_file, star_name, filt, obs_code,
     ]
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        raise ValueError(f"Липсващи колони в .tbl файла: {', '.join(missing_cols)}")
+        raise ValueError(f"Missing columns in .tbl file: {', '.join(missing_cols)}")
 
     plot_filename = plot_light_curve(df, star_name, filt, check_star_id, check_star_name)
 
@@ -250,7 +254,7 @@ def create_aavso_report(input_file, star_name, filt, obs_code,
 
         cname = "ENSEMBLE" if use_ensemble else single_comp_name
 
-        # CMAG: инструментална величина на comp/ансамбъл (идентично с VPhot)
+        # CMAG: instrumental magnitude of comp/ensemble (consistent with VPhot)
         if use_ensemble:
             exptime = _to_float_or_none(row.get("EXPTIME", None))
             comp_ids = sorted(
@@ -273,7 +277,7 @@ def create_aavso_report(input_file, star_name, filt, obs_code,
         else:
             cmag_str = _fmt_or_na(get_instrumental_mag(row, single_comp_id))
 
-        # KMAG: инструментална величина на check звездата (идентично с VPhot)
+        # KMAG: instrumental magnitude of the check star (consistent with VPhot)
         kmag_str = _fmt_or_na(get_instrumental_mag(row, check_star_id))
 
         notes = build_notes_string(row, single_comp_id, check_star_id, check_star_std_mag, comp_err, check_err)
@@ -282,7 +286,7 @@ def create_aavso_report(input_file, star_name, filt, obs_code,
             star_name, _fmt_or_na(row.get("JD_UTC"), 8), _fmt_or_na(row.get("Source_AMag_T1"), 3),
             _fmt_or_na(row.get("Source_AMag_Err_T1"), 3), filt, transformed, "STD",
             cname, cmag_str, check_star_name, kmag_str,
-            _fmt_or_na(row.get("AIRMASS"), 4), "1", chart_id, notes
+            _fmt_or_na(row.get("AIRMASS"), 4), "0", chart_id, notes
         ]
         aavso_data.append(",".join(map(str, aavso_row)))
 
@@ -304,7 +308,7 @@ def create_aavso_report(input_file, star_name, filt, obs_code,
         f.write("\n")
         f.write("\n".join(aavso_data))
 
-    print(f"✅ Успешно създаден AAVSO репорт: '{output_filename}'")
+    print(f"AAVSO report created successfully: '{output_filename}'")
     preview_lines = header + aavso_data
     return output_filename, plot_filename, preview_lines
 
