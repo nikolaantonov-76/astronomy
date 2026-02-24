@@ -3408,35 +3408,6 @@ def _extract_rows_from_next_data(page_html: str):
     return found
 
 
-def _extract_rows_from_json_payload(payload):
-    found = []
-
-    def walk(node):
-        if isinstance(node, dict):
-            lowered = {str(k).lower(): v for k, v in node.items()}
-            jd_val = lowered.get("jd", "")
-            mag_val = lowered.get("magnitude") or lowered.get("mag") or lowered.get("value") or ""
-            if _is_jd_like(str(jd_val)) and _has_magnitude_like_value(str(mag_val)):
-                found.append(
-                    {
-                        "date": str(lowered.get("date", "") or lowered.get("obs_date", "") or ""),
-                        "jd": str(jd_val),
-                        "mag": str(mag_val),
-                        "band": str(lowered.get("band", "") or lowered.get("filter", "") or ""),
-                        "observer": str(lowered.get("observer", "") or lowered.get("obscode", "") or ""),
-                    }
-                )
-            for val in node.values():
-                walk(val)
-            return
-        if isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(payload)
-    return found
-
-
 def _parse_webobs_rows(page_html: str):
     all_rows = _extract_rows_from_next_data(page_html)
     tables = re.findall(r"<table\b.*?>.*?</table>", page_html, flags=re.I | re.S)
