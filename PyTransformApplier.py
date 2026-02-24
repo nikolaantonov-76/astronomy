@@ -1,4 +1,5 @@
 import configparser
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,36 @@ def find_nearest(df_ref, target_date, max_minutes):
     if diff_minutes > max_minutes:
         return None, diff_minutes
     return df_ref.loc[idx], diff_minutes
+
+
+def propagate_r_error(sigma_r, sigma_v, sigma_b, tvr):
+    """
+    Propagate photometric errors through the BVR transformation for the R band.
+
+    The transformed R magnitude depends on the R, V and B instrumental
+    measurements:
+        R_std = V_std + (rc_cat - vc_cat) - Tvr * ((vs - rs) - (vc - rc))
+
+    Taking partial derivatives and adding in quadrature gives:
+        σ_R_trans = √( (Tvr·σ_r)² + σ_v² + σ_b² )
+
+    where σ_b enters because V_std itself was derived from the BV
+    transformation.  B and V errors are unchanged by their own
+    transformations (Tv_bv is small and does not feed back into their
+    error budgets at the level of precision reported here).
+
+    Parameters
+    ----------
+    sigma_r : float  – original R MERR
+    sigma_v : float  – MERR of the matched V frame
+    sigma_b : float  – MERR of the matched B frame
+    tvr     : float  – Tvr transformation coefficient
+
+    Returns
+    -------
+    float – propagated MERR rounded to 3 decimal places
+    """
+    return round(math.sqrt((tvr * sigma_r) ** 2 + sigma_v ** 2 + sigma_b ** 2), 3)
 
 
 def iterative_transform_bv(df_b, df_v, coeffs, max_minutes, warnings):
@@ -191,8 +222,20 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
                 (bs_std - vs_std) - (bc_cat - vc_cat)
             )
             rs_std = vs_std - (vc_cat - rc_cat) - coeffs["Tvr"] * ((vs - rs) - (vc - rc))
+
+        # Propagate photometric errors: σ_R = √((Tvr·σ_r)² + σ_v² + σ_b²)
+        new_merr = propagate_r_error(
+            sigma_r=float(r["Err"]),
+            sigma_v=float(v_match["Err"]),
+            sigma_b=float(b_match["Err"]),
+            tvr=coeffs["Tvr"],
+        )
+
         row = r.copy(); row["MAG_ORIG"] = row["MAG"]
-        row["MAG"] = round(rs_std, 3); row["TRANS"] = "YES"
+        row["MAG"]  = round(rs_std, 3)
+        row["MERR"] = str(new_merr)
+        row["Err"]  = new_merr
+        row["TRANS"] = "YES"
         results.append(row)
 
     return pd.DataFrame(results).sort_values(by="DATE").reset_index(drop=True)
