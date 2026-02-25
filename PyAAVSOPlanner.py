@@ -820,6 +820,7 @@ class TimeAltitudeApp(tk.Tk):
         target_events,
     ):
         x_datetimes, axis_tz = self._to_plot_datetimes(curve_times, tz_name)
+        axis_tzinfo = zoneinfo.ZoneInfo(axis_tz) if axis_tz != "UTC" else dt.timezone.utc
         self.ax.clear()
         self.figure.patch.set_facecolor("#eff3f8")
         self.ax.set_facecolor("#fbfdff")
@@ -893,7 +894,7 @@ class TimeAltitudeApp(tk.Tk):
 
         self.ax.legend_.remove() if self.ax.legend_ else None
 
-        self.ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        self.ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=axis_tzinfo))
         self.figure.autofmt_xdate()
         self.figure.tight_layout()
         self.canvas.draw()
