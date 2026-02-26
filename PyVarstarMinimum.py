@@ -15,6 +15,72 @@ import xml.etree.ElementTree as ET
 
 VSX_API_URL = "https://www.aavso.org/vsx/index.php"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
+FOOTER_TEXT = "Nikola Antonov (nikola.antonov@iaps.institute), https://astro.iaps.instiute"
+
+# ── Shared visual theme ────────────────────────────────────────────────────
+_BG     = "#f0f4f8"
+_BORDER = "#b8c8d8"
+_ACCENT = "#1f4d7a"
+_TEXT   = "#2c3e50"
+
+
+def _apply_theme(root) -> None:
+    """Apply consistent soft-blue theme to the given root window."""
+    import tkinter.font as tkfont
+
+    # 1. Activate clam theme FIRST (resets everything, so must come before customising)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+
+    # 2. Reconfigure every named system font explicitly
+    _F  = ("Segoe UI", 10)
+    _FM = ("Segoe UI", 10, "bold")
+    _FC = ("Consolas", 10)
+    for fname in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                  "TkHeadingFont", "TkCaptionFont", "TkTooltipFont"):
+        try:
+            tkfont.nametofont(fname).configure(family="Segoe UI", size=10)
+        except Exception:
+            pass
+    try:
+        tkfont.nametofont("TkFixedFont").configure(family="Consolas", size=10)
+    except Exception:
+        pass
+
+    # 3. option_add with "interactive" priority overrides all lower-priority theme defaults
+    root.option_add("*Font",        _F,  "interactive")
+    root.option_add("*Text.Font",   _FC, "interactive")
+    root.option_add("*Label.Font",  _F,  "interactive")
+    root.option_add("*Button.Font", _F,  "interactive")
+    root.option_add("*Entry.Font",  _F,  "interactive")
+    root.option_add("*Menu.Font",   _F,  "interactive")
+
+    # 4. Configure every ttk widget type explicitly with font
+    #    (style root "." alone does not cascade reliably in clam)
+    style.configure(".",                 font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TFrame",            background=_BG)
+    style.configure("TLabel",            font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TCheckbutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TRadiobutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TLabelframe",       background=_BG, bordercolor=_BORDER,
+                                         relief="groove", borderwidth=1)
+    style.configure("TLabelframe.Label", font=_FM, background=_BG, foreground=_ACCENT)
+    style.configure("TButton",           font=_F,  background="#dce8f5", foreground="#1a3a5c",
+                                         relief="flat", borderwidth=1, padding=(8, 4))
+    style.map("TButton",
+        background=[("active", "#b8d0ea"), ("pressed", "#90b8e0")],
+        relief=[("pressed", "flat")])
+    style.configure("TEntry",            font=_F,  fieldbackground="white",
+                                         bordercolor=_BORDER, lightcolor=_BORDER, darkcolor=_BORDER)
+    style.configure("TCombobox",         font=_F,  fieldbackground="white", bordercolor=_BORDER)
+    style.configure("Treeview",          font=_F,  background="white",
+                                         fieldbackground="white", rowheight=22)
+    style.configure("Treeview.Heading",  font=_FM, background="#dce8f5", foreground="#1a3a5c")
+    root.configure(bg=_BG)
+# ──────────────────────────────────────────────────────────────────────────
 
 
 # --- JD <-> datetime conversion ---
@@ -185,8 +251,7 @@ class VarstarMinimumApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Variable Star Minima")
-        self.root.geometry("920x620")
-        self.root.minsize(820, 560)
+        _apply_theme(root)
 
         now_utc = datetime.now(timezone.utc)
         default_start = (now_utc - timedelta(days=2)).strftime(DATETIME_FMT)
@@ -204,6 +269,14 @@ class VarstarMinimumApp:
 
         self._build_menu()
         self._build_ui()
+        self._fit_window_to_content()
+
+    def _fit_window_to_content(self):
+        self.root.update_idletasks()
+        width  = min(max(self.root.winfo_reqwidth(),  800), 960)
+        height = min(max(self.root.winfo_reqheight(), 560), 680)
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(width, height)
 
     def _build_menu(self):
         menu = tk.Menu(self.root)
@@ -218,8 +291,8 @@ class VarstarMinimumApp:
         self.root.config(menu=menu)
 
     def _build_ui(self):
-        frame = ttk.Frame(self.root, padding=12)
-        frame.pack(fill="both", expand=True)
+        frame = ttk.LabelFrame(self.root, text="Ephemeris & Window", padding=12)
+        frame.pack(fill="both", expand=True, padx=12, pady=(12, 8))
 
         fields = [
             ("Variable Star Name", "star_name"),
@@ -249,8 +322,18 @@ class VarstarMinimumApp:
             row=len(fields) + 1, column=0, columnspan=3, sticky="we", padx=8, pady=(0, 10)
         )
 
-        self.output = tk.Text(frame, wrap="none", height=18)
+        self.output = tk.Text(frame, wrap="none", height=18,
+                              background="white", relief="flat",
+                              font=("Consolas", 10),
+                              highlightbackground=_BORDER, highlightthickness=1)
         self.output.grid(row=len(fields) + 2, column=0, columnspan=3, sticky="nsew", padx=8, pady=(0, 8))
+        ttk.Label(
+            frame,
+            text=FOOTER_TEXT,
+            anchor="center",
+            justify="center",
+            foreground="#888888",
+        ).grid(row=len(fields) + 3, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 4))
 
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(len(fields) + 2, weight=1)

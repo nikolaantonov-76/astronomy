@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import requests
 import tkinter as tk
+import tkinter.font as tkfont
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_sun
 from astropy.time import Time, TimeDelta
 from astropy.utils import iers
@@ -43,6 +44,72 @@ DEFAULTS = {
     "timezone": "Europe/Sofia",
     "show_rise_set": True,
 }
+FOOTER_TEXT = "Nikola Antonov (nikola.antonov@iaps.institute), https://astro.iaps.instiute"
+
+# ── Shared visual theme ────────────────────────────────────────────────────
+_BG     = "#f0f4f8"
+_BORDER = "#b8c8d8"
+_ACCENT = "#1f4d7a"
+_TEXT   = "#2c3e50"
+
+
+def _apply_theme(root) -> None:
+    """Apply consistent soft-blue theme to the given root window."""
+    import tkinter.font as tkfont
+
+    # 1. Activate clam theme FIRST (resets everything, so must come before customising)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+
+    # 2. Reconfigure every named system font explicitly
+    _F  = ("Segoe UI", 10)
+    _FM = ("Segoe UI", 10, "bold")
+    _FC = ("Consolas", 10)
+    for fname in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                  "TkHeadingFont", "TkCaptionFont", "TkTooltipFont"):
+        try:
+            tkfont.nametofont(fname).configure(family="Segoe UI", size=10)
+        except Exception:
+            pass
+    try:
+        tkfont.nametofont("TkFixedFont").configure(family="Consolas", size=10)
+    except Exception:
+        pass
+
+    # 3. option_add with "interactive" priority overrides all lower-priority theme defaults
+    root.option_add("*Font",        _F,  "interactive")
+    root.option_add("*Text.Font",   _FC, "interactive")
+    root.option_add("*Label.Font",  _F,  "interactive")
+    root.option_add("*Button.Font", _F,  "interactive")
+    root.option_add("*Entry.Font",  _F,  "interactive")
+    root.option_add("*Menu.Font",   _F,  "interactive")
+
+    # 4. Configure every ttk widget type explicitly with font
+    #    (style root "." alone does not cascade reliably in clam)
+    style.configure(".",                 font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TFrame",            background=_BG)
+    style.configure("TLabel",            font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TCheckbutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TRadiobutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TLabelframe",       background=_BG, bordercolor=_BORDER,
+                                         relief="groove", borderwidth=1)
+    style.configure("TLabelframe.Label", font=_FM, background=_BG, foreground=_ACCENT)
+    style.configure("TButton",           font=_F,  background="#dce8f5", foreground="#1a3a5c",
+                                         relief="flat", borderwidth=1, padding=(8, 4))
+    style.map("TButton",
+        background=[("active", "#b8d0ea"), ("pressed", "#90b8e0")],
+        relief=[("pressed", "flat")])
+    style.configure("TEntry",            font=_F,  fieldbackground="white",
+                                         bordercolor=_BORDER, lightcolor=_BORDER, darkcolor=_BORDER)
+    style.configure("TCombobox",         font=_F,  fieldbackground="white", bordercolor=_BORDER)
+    style.configure("Treeview",          font=_F,  background="white",
+                                         fieldbackground="white", rowheight=22)
+    style.configure("Treeview.Heading",  font=_FM, background="#dce8f5", foreground="#1a3a5c")
+    root.configure(bg=_BG)
+# ──────────────────────────────────────────────────────────────────────────
 
 _SESAME = [
     "https://cds.unistra.fr/cgi-bin/nph-sesame/-oJ?{name}",
@@ -399,12 +466,13 @@ def fetch_latest_aavso_observations(object_name: str, limit: int = 5):
     return [], last_error
 
 
-class TimeAltitudeApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("AAVSO Observation Planner")
-        self.geometry("1180x760")
-        self.minsize(980, 640)
+class TimeAltitudeApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("AAVSO Observation Planner")
+        self.root.geometry("1160x760")
+        self.root.minsize(1020, 700)
+        _apply_theme(self.root)
 
         self.vars = {
             "object_name": tk.StringVar(value=DEFAULTS["object_name"]),
@@ -428,19 +496,22 @@ class TimeAltitudeApp(tk.Tk):
 
         self._build_menu()
         self._build_ui()
+        # Keep Tk scaling identical to PyAAVSOGenerator so both applications
+        # render the same Segoe UI font weight and size on screen.
         self._load_settings_from_disk(show_feedback=False)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_menu(self):
-        main_menu = tk.Menu(self)
+        _F = ("Segoe UI", 10)
+        main_menu = tk.Menu(self.root, font=_F)
 
-        file_menu = tk.Menu(main_menu, tearoff=0)
+        file_menu = tk.Menu(main_menu, tearoff=0, font=_F)
         file_menu.add_command(label="Run", command=self._run)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
         main_menu.add_cascade(label="File", menu=file_menu)
 
-        settings_menu = tk.Menu(main_menu, tearoff=0)
+        settings_menu = tk.Menu(main_menu, tearoff=0, font=_F)
         settings_menu.add_command(label="Save Settings", command=self._save_settings_to_disk)
         settings_menu.add_command(label="Load Settings", command=self._load_settings_from_disk)
         settings_menu.add_command(label="Reset Defaults", command=self._reset_defaults)
@@ -448,20 +519,36 @@ class TimeAltitudeApp(tk.Tk):
         settings_menu.add_command(label="Set Date = Tomorrow (UTC)", command=self._set_tomorrow_utc)
         main_menu.add_cascade(label="Settings", menu=settings_menu)
 
-        help_menu = tk.Menu(main_menu, tearoff=0)
+        help_menu = tk.Menu(main_menu, tearoff=0, font=_F)
         help_menu.add_command(label="About", command=self._show_about)
         main_menu.add_cascade(label="Help", menu=help_menu)
 
-        self.config(menu=main_menu)
+        self.root.config(menu=main_menu)
 
     def _build_ui(self):
-        root_frame = ttk.Frame(self, padding=12)
+        _F  = ("Segoe UI", 10)
+        _FM = ("Segoe UI", 10, "bold")
+        _FC = ("Consolas", 10)
+
+        root_frame = ttk.Frame(self.root, padding=12)
         root_frame.pack(fill="both", expand=True)
 
-        left = ttk.LabelFrame(root_frame, text="Query Settings", padding=10)
+        ttk.Label(
+            root_frame,
+            text=FOOTER_TEXT,
+            font=_F,
+            anchor="center",
+            justify="center",
+            foreground="#888888",
+        ).pack(side="bottom", fill="x", pady=(8, 0))
+
+        content_frame = ttk.Frame(root_frame)
+        content_frame.pack(side="top", fill="both", expand=True)
+
+        left = ttk.LabelFrame(content_frame, text="Query Settings", padding=10)
         left.pack(side="left", fill="y", padx=(0, 10))
 
-        right = ttk.Frame(root_frame)
+        right = ttk.Frame(content_frame)
         right.pack(side="right", fill="both", expand=True)
 
         fields = [
@@ -475,8 +562,8 @@ class TimeAltitudeApp(tk.Tk):
         ]
 
         for row, (label, key) in enumerate(fields):
-            ttk.Label(left, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            ttk.Entry(left, textvariable=self.vars[key], width=28).grid(row=row, column=1, sticky="we", pady=4, padx=(8, 0))
+            ttk.Label(left, text=label, font=_F).grid(row=row, column=0, sticky="w", pady=4)
+            ttk.Entry(left, textvariable=self.vars[key], width=28, font=_F).grid(row=row, column=1, sticky="we", pady=4, padx=(8, 0))
 
         ttk.Checkbutton(
             left,
@@ -487,7 +574,8 @@ class TimeAltitudeApp(tk.Tk):
         self.run_button = ttk.Button(left, text="Run Query", command=self._run)
         self.run_button.grid(row=len(fields) + 1, column=0, columnspan=2, sticky="we", pady=(6, 2))
 
-        ttk.Label(left, textvariable=self.vars["coord_info"], foreground="#1f4d7a", wraplength=290, justify="left").grid(
+        ttk.Label(left, textvariable=self.vars["coord_info"], font=_F,
+                  foreground="#1f4d7a", wraplength=290, justify="left").grid(
             row=len(fields) + 2, column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
 
@@ -503,7 +591,10 @@ class TimeAltitudeApp(tk.Tk):
 
         text_frame = ttk.LabelFrame(right, text="Events", padding=8)
         text_frame.pack(fill="both", expand=False, pady=(10, 0))
-        self.output = ScrolledText(text_frame, wrap="word", height=11)
+        self.output = ScrolledText(text_frame, wrap="word", height=11,
+                                   background="white", relief="flat",
+                                   font=_FC,
+                                   highlightbackground=_BORDER, highlightthickness=1)
         self.output.pack(fill="both", expand=True)
 
     def _reset_defaults(self):
@@ -643,17 +734,17 @@ class TimeAltitudeApp(tk.Tk):
         self._query_running = running
         if self.run_button is not None:
             self.run_button.configure(state=("disabled" if running else "normal"))
-        self.config(cursor=("watch" if running else ""))
+        self.root.config(cursor=("watch" if running else ""))
         if status_text:
             self.output.delete("1.0", tk.END)
             self.output.insert("1.0", status_text + "\n")
-        self.update_idletasks()
+        self.root.update_idletasks()
 
     def _start_polling_results(self):
         if self._poll_after_id is not None:
-            self.after_cancel(self._poll_after_id)
+            self.root.after_cancel(self._poll_after_id)
             self._poll_after_id = None
-        self._poll_after_id = self.after(120, self._poll_results)
+        self._poll_after_id = self.root.after(120, self._poll_results)
 
     def _poll_results(self):
         self._poll_after_id = None
@@ -699,7 +790,7 @@ class TimeAltitudeApp(tk.Tk):
                 )
                 self._set_query_running(False)
         if self._query_running and not handled:
-            self._poll_after_id = self.after(120, self._poll_results)
+            self._poll_after_id = self.root.after(120, self._poll_results)
 
     def _run_worker(
         self,
@@ -902,7 +993,7 @@ class TimeAltitudeApp(tk.Tk):
     def _on_close(self):
         if self._poll_after_id is not None:
             try:
-                self.after_cancel(self._poll_after_id)
+                self.root.after_cancel(self._poll_after_id)
             except Exception:
                 pass
             self._poll_after_id = None
@@ -910,13 +1001,14 @@ class TimeAltitudeApp(tk.Tk):
             plt.close(self.figure)
         except Exception:
             pass
-        self.quit()
-        self.destroy()
+        self.root.quit()
+        self.root.destroy()
 
 
 def main():
-    app = TimeAltitudeApp()
-    app.mainloop()
+    root = tk.Tk()
+    TimeAltitudeApp(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":

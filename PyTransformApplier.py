@@ -26,6 +26,72 @@ aij_columns = [
     "CNAME", "CMAG", "KNAME", "KMAG", "AMASS", "GROUP", "CHART", "NOTES",
 ]
 UI_SETTINGS_FILE = Path("PyTransformApplier.settings.ini")
+FOOTER_TEXT = "Nikola Antonov (nikola.antonov@iaps.institute), https://astro.iaps.instiute"
+
+# ── Shared visual theme ────────────────────────────────────────────────────
+_BG     = "#f0f4f8"
+_BORDER = "#b8c8d8"
+_ACCENT = "#1f4d7a"
+_TEXT   = "#2c3e50"
+
+
+def _apply_theme(root) -> None:
+    """Apply consistent soft-blue theme to the given root window."""
+    import tkinter.font as tkfont
+
+    # 1. Activate clam theme FIRST (resets everything, so must come before customising)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+
+    # 2. Reconfigure every named system font explicitly
+    _F  = ("Segoe UI", 10)
+    _FM = ("Segoe UI", 10, "bold")
+    _FC = ("Consolas", 10)
+    for fname in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                  "TkHeadingFont", "TkCaptionFont", "TkTooltipFont"):
+        try:
+            tkfont.nametofont(fname).configure(family="Segoe UI", size=10)
+        except Exception:
+            pass
+    try:
+        tkfont.nametofont("TkFixedFont").configure(family="Consolas", size=10)
+    except Exception:
+        pass
+
+    # 3. option_add with "interactive" priority overrides all lower-priority theme defaults
+    root.option_add("*Font",        _F,  "interactive")
+    root.option_add("*Text.Font",   _FC, "interactive")
+    root.option_add("*Label.Font",  _F,  "interactive")
+    root.option_add("*Button.Font", _F,  "interactive")
+    root.option_add("*Entry.Font",  _F,  "interactive")
+    root.option_add("*Menu.Font",   _F,  "interactive")
+
+    # 4. Configure every ttk widget type explicitly with font
+    #    (style root "." alone does not cascade reliably in clam)
+    style.configure(".",                 font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TFrame",            background=_BG)
+    style.configure("TLabel",            font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TCheckbutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TRadiobutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TLabelframe",       background=_BG, bordercolor=_BORDER,
+                                         relief="groove", borderwidth=1)
+    style.configure("TLabelframe.Label", font=_FM, background=_BG, foreground=_ACCENT)
+    style.configure("TButton",           font=_F,  background="#dce8f5", foreground="#1a3a5c",
+                                         relief="flat", borderwidth=1, padding=(8, 4))
+    style.map("TButton",
+        background=[("active", "#b8d0ea"), ("pressed", "#90b8e0")],
+        relief=[("pressed", "flat")])
+    style.configure("TEntry",            font=_F,  fieldbackground="white",
+                                         bordercolor=_BORDER, lightcolor=_BORDER, darkcolor=_BORDER)
+    style.configure("TCombobox",         font=_F,  fieldbackground="white", bordercolor=_BORDER)
+    style.configure("Treeview",          font=_F,  background="white",
+                                         fieldbackground="white", rowheight=22)
+    style.configure("Treeview.Heading",  font=_FM, background="#dce8f5", foreground="#1a3a5c")
+    root.configure(bg=_BG)
+# ──────────────────────────────────────────────────────────────────────────
 
 
 def parse_notes_column(df):
@@ -351,7 +417,8 @@ class SettingsDialog(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Transform Applier Settings")
-        self.resizable(False, False)
+        self.resizable(True, True)
+        _apply_theme(self)
 
         self.scenario_var    = tk.StringVar(value="BVR")
         self.b_file_var      = tk.StringVar(value="B.txt")
@@ -366,10 +433,17 @@ class SettingsDialog(tk.Tk):
         self._load_saved_settings()
         self._refresh_coefficients_table()
         self._toggle_r_controls()
+        self.update_idletasks()
+        w = min(max(self.winfo_reqwidth(),  700), 860)
+        h = min(max(self.winfo_reqheight(), 520), 660)
+        self.geometry(f"{w}x{h}")
+        self.minsize(w, h)
 
     def _build_ui(self):
-        frame = ttk.Frame(self, padding=12)
-        frame.grid(row=0, column=0, sticky="nsew")
+        frame = ttk.LabelFrame(self, text="Transformation Settings", padding=12)
+        frame.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
         ttk.Label(frame, text="Scenario").grid(row=0, column=0, sticky="w", pady=4)
         scenario_combo = ttk.Combobox(
@@ -397,29 +471,36 @@ class SettingsDialog(tk.Tk):
         table_frame = ttk.Frame(frame)
         table_frame.grid(row=6, column=1, columnspan=3, sticky="we", pady=(10, 4))
         columns = ("coefficient", "value", "error", "r2")
-        self.coeffs_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=8)
+        self.coeffs_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=5)
         self.coeffs_table.heading("coefficient", text="Coefficient")
         self.coeffs_table.heading("value", text="Value")
         self.coeffs_table.heading("error", text="Error")
         self.coeffs_table.heading("r2", text="R²")
-        self.coeffs_table.column("coefficient", width=130, anchor="w")
-        self.coeffs_table.column("value", width=90, anchor="e")
-        self.coeffs_table.column("error", width=90, anchor="e")
-        self.coeffs_table.column("r2", width=90, anchor="e")
+        self.coeffs_table.column("coefficient", width=120, anchor="w")
+        self.coeffs_table.column("value", width=85, anchor="e")
+        self.coeffs_table.column("error", width=85, anchor="e")
+        self.coeffs_table.column("r2", width=85, anchor="e")
         self.coeffs_table.grid(row=0, column=0, sticky="nsew")
         table_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.coeffs_table.yview)
         self.coeffs_table.configure(yscrollcommand=table_scroll.set)
         table_scroll.grid(row=0, column=1, sticky="ns")
-        ttk.Label(frame, textvariable=self.coeffs_status_var, foreground="#666666").grid(
+        ttk.Label(frame, textvariable=self.coeffs_status_var, foreground="#888888").grid(
             row=7, column=1, columnspan=3, sticky="w"
         )
 
         ttk.Button(frame, text="Execute", command=self._execute).grid(
             row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        ttk.Label(
+            frame,
+            text=FOOTER_TEXT,
+            anchor="center",
+            justify="center",
+            foreground="#888888",
+        ).grid(row=9, column=0, columnspan=4, sticky="ew", pady=(8, 0))
 
     def _add_file_row(self, parent, row, label, variable):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
-        entry = ttk.Entry(parent, textvariable=variable, width=45)
+        entry = ttk.Entry(parent, textvariable=variable, width=36)
         entry.grid(row=row, column=1, sticky="we", pady=4, padx=(8, 8))
         button = ttk.Button(parent, text="Browse", command=lambda: self._browse_file(variable))
         button.grid(row=row, column=2, sticky="w", pady=4)

@@ -36,7 +36,73 @@ CHECK_STAR_STD_MAG_ERR = 0.029
 
 TRANSFORMED = "NO"
 
+# ── Shared visual theme ────────────────────────────────────────────────────
+_BG     = "#f0f4f8"
+_BORDER = "#b8c8d8"
+_ACCENT = "#1f4d7a"
+_TEXT   = "#2c3e50"
+
+
+def _apply_theme(root) -> None:
+    """Apply consistent soft-blue theme to the given root window."""
+    import tkinter.font as tkfont
+
+    # 1. Activate clam theme FIRST (resets everything, so must come before customising)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+
+    # 2. Reconfigure every named system font explicitly
+    _F  = ("Segoe UI", 10)
+    _FM = ("Segoe UI", 10, "bold")
+    _FC = ("Consolas", 10)
+    for fname in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                  "TkHeadingFont", "TkCaptionFont", "TkTooltipFont"):
+        try:
+            tkfont.nametofont(fname).configure(family="Segoe UI", size=10)
+        except Exception:
+            pass
+    try:
+        tkfont.nametofont("TkFixedFont").configure(family="Consolas", size=10)
+    except Exception:
+        pass
+
+    # 3. option_add with "interactive" priority overrides all lower-priority theme defaults
+    root.option_add("*Font",        _F,  "interactive")
+    root.option_add("*Text.Font",   _FC, "interactive")
+    root.option_add("*Label.Font",  _F,  "interactive")
+    root.option_add("*Button.Font", _F,  "interactive")
+    root.option_add("*Entry.Font",  _F,  "interactive")
+    root.option_add("*Menu.Font",   _F,  "interactive")
+
+    # 4. Configure every ttk widget type explicitly with font
+    #    (style root "." alone does not cascade reliably in clam)
+    style.configure(".",                 font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TFrame",            background=_BG)
+    style.configure("TLabel",            font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TCheckbutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TRadiobutton",      font=_F,  background=_BG, foreground=_TEXT)
+    style.configure("TLabelframe",       background=_BG, bordercolor=_BORDER,
+                                         relief="groove", borderwidth=1)
+    style.configure("TLabelframe.Label", font=_FM, background=_BG, foreground=_ACCENT)
+    style.configure("TButton",           font=_F,  background="#dce8f5", foreground="#1a3a5c",
+                                         relief="flat", borderwidth=1, padding=(8, 4))
+    style.map("TButton",
+        background=[("active", "#b8d0ea"), ("pressed", "#90b8e0")],
+        relief=[("pressed", "flat")])
+    style.configure("TEntry",            font=_F,  fieldbackground="white",
+                                         bordercolor=_BORDER, lightcolor=_BORDER, darkcolor=_BORDER)
+    style.configure("TCombobox",         font=_F,  fieldbackground="white", bordercolor=_BORDER)
+    style.configure("Treeview",          font=_F,  background="white",
+                                         fieldbackground="white", rowheight=22)
+    style.configure("Treeview.Heading",  font=_FM, background="#dce8f5", foreground="#1a3a5c")
+    root.configure(bg=_BG)
+# ──────────────────────────────────────────────────────────────────────────
+
 # --- END CONFIGURATION ---
+FOOTER_TEXT = "Nikola Antonov (nikola.antonov@iaps.institute), https://astro.iaps.instiute"
 
 
 def _to_float_or_none(value):
@@ -317,8 +383,7 @@ class AavsoGeneratorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("AAVSO Report Generator")
-        self.root.geometry("760x560")
-        self.root.minsize(700, 500)
+        _apply_theme(root)
         self.config_dir = Path.cwd() / "aavso_configs"
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -340,15 +405,33 @@ class AavsoGeneratorGUI:
         }
         self._build_ui()
         self._refresh_profiles()
+        self._fit_window_to_content()
+
+    def _fit_window_to_content(self):
+        self.root.update_idletasks()
+        width  = min(max(self.root.winfo_reqwidth(),  820), 980)
+        height = min(max(self.root.winfo_reqheight(), 620), 740)
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(width, height)
 
     def _build_ui(self):
-        pad = {"padx": 8, "pady": 6}
+        pad = {"padx": 8, "pady": 5}
+        ttk.Label(
+            self.root,
+            text=FOOTER_TEXT,
+            anchor="center",
+            justify="center",
+            foreground="#888888",
+        ).pack(side="bottom", fill="x", padx=14, pady=(0, 6))
         action_bar = ttk.Frame(self.root)
-        action_bar.pack(side="bottom", fill="x", padx=14, pady=(0, 10))
+        action_bar.pack(side="bottom", fill="x", padx=14, pady=(0, 6))
         ttk.Button(action_bar, text="Execute", command=self._generate).pack(side="right")
 
-        frame = ttk.Frame(self.root)
-        frame.pack(fill="both", expand=True, padx=14, pady=(14, 8))
+        outer = ttk.Frame(self.root)
+        outer.pack(fill="both", expand=True, padx=14, pady=(14, 8))
+
+        frame = ttk.LabelFrame(outer, text="Observation Settings", padding=10)
+        frame.pack(fill="both", expand=True)
 
         fields = [
             ("Star Name", "star_name"),
