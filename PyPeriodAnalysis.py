@@ -197,6 +197,8 @@ def run_lomb_scargle(
     center_data: bool,
     nterms: int,
     fap_method: str,
+    fold_period_override: float | None,
+    fold_t0_override: float | None,
 ):
     work = df.copy()
     if filt and filt.upper() != "ALL":
@@ -232,13 +234,26 @@ def run_lomb_scargle(
     )
     min_freq = 1.0 / max_period
     max_freq = 1.0 / min_period
-    freq, power = ls.autopower(
-        minimum_frequency=min_freq,
-        maximum_frequency=max_freq,
-        samples_per_peak=int(samples_per_peak),
-        nyquist_factor=float(nyquist_factor),
-        method=ls_method,
-    )
+    used_ls_method = ls_method
+    try:
+        freq, power = ls.autopower(
+            minimum_frequency=min_freq,
+            maximum_frequency=max_freq,
+            samples_per_peak=int(samples_per_peak),
+            nyquist_factor=float(nyquist_factor),
+            method=ls_method,
+        )
+    except ModuleNotFoundError as exc:
+        if "scipy" not in str(exc).lower():
+            raise
+        used_ls_method = "fast"
+        freq, power = ls.autopower(
+            minimum_frequency=min_freq,
+            maximum_frequency=max_freq,
+            samples_per_peak=int(samples_per_peak),
+            nyquist_factor=float(nyquist_factor),
+            method=used_ls_method,
+        )
     if len(freq) == 0:
         raise ValueError("Frequency grid is empty. Adjust the period bounds.")
 
@@ -249,36 +264,61 @@ def run_lomb_scargle(
     t_rel_start = float(np.min(t_rel))
     model_t_rel_one_cycle = t_rel_start + np.linspace(0.0, best_period, 2000)
     model_mag_one_cycle = ls.model(model_t_rel_one_cycle, best_freq)
-    t0_rel = float(model_t_rel_one_cycle[int(np.argmin(model_mag_one_cycle))])
+    # Classical convention requested: T0 at minimum brightness
+    # (in magnitudes this is the maximum model magnitude).
+    t0_idx = int(np.argmax(model_mag_one_cycle))
+    t0_rel = float(model_t_rel_one_cycle[t0_idx])
     t0_phase = t0_rel + t_ref
 
-    phase = ((t_rel - t0_rel) * best_freq) % 1.0
+    fold_period = float(fold_period_override) if fold_period_override and fold_period_override > 0 else best_period
+    fold_freq = 1.0 / fold_period
+    fold_t0 = float(fold_t0_override) if fold_t0_override and np.isfinite(fold_t0_override) else t0_phase
+    fold_t0_rel = fold_t0 - t_ref
+
+    # Explicit astronomy fold formula: phase = frac((JD - T0) / P)
+    phase = np.mod((t - fold_t0) / fold_period, 1.0)
     order = np.argsort(phase)
     model_phase = np.linspace(0.0, 1.0, 400)
-    model_t_rel = t0_rel + (model_phase / best_freq)
-    model_mag = ls.model(model_t_rel, best_freq)
+    model_t_rel = fold_t0_rel + (model_phase / fold_freq)
+    try:
+        model_mag = ls.model(model_t_rel, fold_freq)
+    except Exception:
+        model_mag = np.full_like(model_phase, np.nan, dtype=float)
+
+    cycles_covered = (float(np.max(t)) - float(np.min(t))) / fold_period if fold_period > 0 else math.nan
 
     period = 1.0 / freq
     per_order = np.argsort(period)
     period_sorted = period[per_order]
     power_sorted = power[per_order]
 
-    try:
-        fap = float(ls.false_alarm_probability(float(power[best_idx]), method=fap_method))
-    except Exception:
-        fap = math.nan
-    fap_levels = {}
-    for alpha in (0.1, 0.05, 0.01):
+    fap_error = ""
+    fap_method_used = ""
+    fap_candidates = [fap_method] + [m for m in ("baluev", "davies", "naive", "bootstrap") if m != fap_method]
+    fap = math.nan
+    for method_name in fap_candidates:
         try:
-            fap_levels[alpha] = float(ls.false_alarm_level(alpha, method=fap_method))
-        except Exception:
-            pass
+            fap = float(ls.false_alarm_probability(float(power[best_idx]), method=method_name))
+            fap_method_used = method_name
+            break
+        except Exception as exc:
+            fap_error = f"{type(exc).__name__}: {exc}"
+    fap_levels = {}
+    if fap_method_used:
+        for alpha in (0.1, 0.05, 0.01):
+            try:
+                fap_levels[alpha] = float(ls.false_alarm_level(alpha, method=fap_method_used))
+            except Exception:
+                pass
+
+    fap_text = f"{fap:.3e}" if np.isfinite(fap) else "n/a"
 
     return {
         "work": work,
         "t": t,
         "t_ref": t_ref,
         "y": y,
+        "dy": dy,
         "freq": freq,
         "period": period,
         "power": power,
@@ -287,8 +327,16 @@ def run_lomb_scargle(
         "best_freq": best_freq,
         "best_period": best_period,
         "best_period_min": best_period * 24.0 * 60.0,
+        "used_ls_method": used_ls_method,
         "t0_phase": t0_phase,
+        "fold_period": fold_period,
+        "fold_period_min": fold_period * 24.0 * 60.0,
+        "fold_t0": fold_t0,
+        "cycles_covered": cycles_covered,
         "fap": fap,
+        "fap_text": fap_text,
+        "fap_method_used": fap_method_used,
+        "fap_error": fap_error,
         "fap_levels": fap_levels,
         "phase": phase[order],
         "y_phase": y[order],
@@ -316,6 +364,8 @@ class PeriodAnalysisGUI:
             "fit_mean": tk.BooleanVar(value=True),
             "center_data": tk.BooleanVar(value=True),
             "nterms": tk.StringVar(value="1"),
+            "fold_period": tk.StringVar(value=""),
+            "fold_t0": tk.StringVar(value=""),
             "use_errors": tk.BooleanVar(value=True),
             "exclude_limits": tk.BooleanVar(value=True),
         }
@@ -379,7 +429,7 @@ class PeriodAnalysisGUI:
         ttk.Combobox(
             controls,
             textvariable=self.vars["ls_method"],
-            values=["auto", "fast", "slow", "cython", "chi2", "fastchi2", "scipy"],
+            values=["auto", "fast", "slow", "cython", "chi2", "fastchi2"],
             width=16,
             state="readonly",
         ).grid(row=4, column=1, sticky="w", **pad)
@@ -403,17 +453,22 @@ class PeriodAnalysisGUI:
         ttk.Label(controls, text="nterms").grid(row=5, column=2, sticky="e", **pad)
         ttk.Entry(controls, textvariable=self.vars["nterms"], width=18).grid(row=5, column=3, sticky="w", **pad)
 
+        ttk.Label(controls, text="Fold Period Override (d)").grid(row=6, column=0, sticky="e", **pad)
+        ttk.Entry(controls, textvariable=self.vars["fold_period"], width=18).grid(row=6, column=1, sticky="w", **pad)
+        ttk.Label(controls, text="Fold T0 Override (JD)").grid(row=6, column=2, sticky="e", **pad)
+        ttk.Entry(controls, textvariable=self.vars["fold_t0"], width=18).grid(row=6, column=3, sticky="w", **pad)
+
         ttk.Checkbutton(controls, text="Use MERR as uncertainty", variable=self.vars["use_errors"]).grid(
-            row=6, column=0, columnspan=2, sticky="w", padx=8, pady=5
+            row=7, column=0, columnspan=2, sticky="w", padx=8, pady=5
         )
         ttk.Checkbutton(controls, text="fit_mean", variable=self.vars["fit_mean"]).grid(
-            row=6, column=2, sticky="w", padx=8, pady=5
+            row=7, column=2, sticky="w", padx=8, pady=5
         )
         ttk.Checkbutton(controls, text="center_data", variable=self.vars["center_data"]).grid(
-            row=6, column=3, sticky="w", padx=8, pady=5
+            row=7, column=3, sticky="w", padx=8, pady=5
         )
         ttk.Checkbutton(controls, text="Exclude upper-limit points (<MAG)", variable=self.vars["exclude_limits"]).grid(
-            row=7, column=1, columnspan=3, sticky="w", padx=8, pady=(2, 8)
+            row=8, column=1, columnspan=3, sticky="w", padx=8, pady=(2, 8)
         )
 
         controls.columnconfigure(1, weight=1)
@@ -428,7 +483,7 @@ class PeriodAnalysisGUI:
         plot_frame = ttk.LabelFrame(outer, text="Lomb-Scargle Results", padding=8)
         plot_frame.pack(fill="both", expand=True)
 
-        self.fig, self.axes = plt.subplots(2, 1, figsize=(10, 7), dpi=100)
+        self.fig, self.axes = plt.subplots(3, 1, figsize=(10, 9), dpi=100)
         self.fig.patch.set_facecolor("#f8fbff")
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -436,17 +491,21 @@ class PeriodAnalysisGUI:
         self.root.bind("<Return>", lambda _event: self._analyze())
 
     def _draw_placeholder(self):
-        ax1, ax2 = self.axes
+        ax1, ax2, ax3 = self.axes
         for ax in self.axes:
             ax.clear()
             ax.grid(True, alpha=0.3)
-        ax1.set_title("Periodogram")
+        ax1.set_title("Lomb-Scargle Periodogram")
         ax1.set_xlabel("Period (days)")
         ax1.set_ylabel("Power")
-        ax2.set_title("Phase-folded Light Curve")
-        ax2.set_xlabel("Phase")
+        ax2.set_title("Light Curve (JD)")
+        ax2.set_xlabel("JD")
         ax2.set_ylabel("Magnitude")
         ax2.invert_yaxis()
+        ax3.set_title("Phase-folded Light Curve")
+        ax3.set_xlabel("Phase")
+        ax3.set_ylabel("Magnitude")
+        ax3.invert_yaxis()
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
@@ -484,6 +543,10 @@ class PeriodAnalysisGUI:
             spp = int(float(self.vars["samples_per_peak"].get().strip()))
             nyquist_factor = float(self.vars["nyquist_factor"].get().strip())
             nterms = int(float(self.vars["nterms"].get().strip()))
+            fold_period_raw = self.vars["fold_period"].get().strip()
+            fold_t0_raw = self.vars["fold_t0"].get().strip()
+            fold_period = float(fold_period_raw) if fold_period_raw else None
+            fold_t0 = float(fold_t0_raw) if fold_t0_raw else None
             if min_period <= 0 or max_period <= 0:
                 raise ValueError("Period bounds must be positive.")
             if min_period >= max_period:
@@ -494,6 +557,8 @@ class PeriodAnalysisGUI:
                 raise ValueError("Nyquist factor must be positive.")
             if nterms < 1:
                 raise ValueError("nterms must be >= 1.")
+            if fold_period is not None and fold_period <= 0:
+                raise ValueError("Fold period override must be positive.")
 
             res = run_lomb_scargle(
                 df=self.df,
@@ -510,23 +575,39 @@ class PeriodAnalysisGUI:
                 center_data=bool(self.vars["center_data"].get()),
                 nterms=nterms,
                 fap_method=self.vars["fap_method"].get().strip(),
+                fold_period_override=fold_period,
+                fold_t0_override=fold_t0,
             )
             self._plot_results(res)
             self.summary_label.config(
                 text=(
                     f"Best period: {res['best_period']:.8f} d  "
                     f"({res['best_period_min']:.2f} min), "
-                    f"T0(phase=0): JD {res['t0_phase']:.6f}, "
-                    f"FAP={res['fap']:.3e}, points={len(res['work'])}"
+                    f"Fold: P={res['fold_period']:.8f} d ({res['fold_period_min']:.2f} min), "
+                    f"T0(min brightness)=JD {res['fold_t0']:.6f}, Cycles~{res['cycles_covered']:.2f}, "
+                    f"FAP={res['fap_text']}, points={len(res['work'])}"
                 )
             )
+            if res.get("used_ls_method") != self.vars["ls_method"].get().strip():
+                messagebox.showwarning(
+                    "Method Fallback",
+                    f"Selected LS method is unavailable in this environment. Switched to '{res['used_ls_method']}'.",
+                )
         except Exception as exc:
-            messagebox.showerror("Analysis Error", str(exc))
+            msg = str(exc)
+            if "No module named 'scipy'" in msg or 'No module named "scipy"' in msg:
+                msg = (
+                    "SciPy is not installed, but the current option requires it.\n\n"
+                    "Switch LS Method to: auto / fast / slow / cython / chi2 / fastchi2.\n"
+                    "Or install SciPy in your environment."
+                )
+            messagebox.showerror("Analysis Error", msg)
 
     def _plot_results(self, res):
-        ax1, ax2 = self.axes
+        ax1, ax2, ax3 = self.axes
         ax1.clear()
         ax2.clear()
+        ax3.clear()
 
         ax1.plot(res["period_sorted"], res["power_sorted"], color="#1f4d7a", lw=1.2)
         ax1.axvline(res["best_period"], color="#d64545", ls="--", lw=1.0)
@@ -547,21 +628,50 @@ class PeriodAnalysisGUI:
         ax1.set_ylabel("Power")
         ax1.grid(True, alpha=0.3)
 
+        jd_order = np.argsort(res["t"])
+        t_jd = res["t"][jd_order]
+        y_jd = res["y"][jd_order]
+        dy_jd = None
+        if res["dy"] is not None:
+            dy_arr = np.asarray(res["dy"], dtype=float)
+            dy_jd = dy_arr[jd_order]
+        if dy_jd is not None and np.isfinite(dy_jd).any():
+            ax2.errorbar(
+                t_jd,
+                y_jd,
+                yerr=dy_jd,
+                fmt="o",
+                ms=4,
+                color="#2e7d32",
+                ecolor="#87a58c",
+                elinewidth=0.8,
+                capsize=2,
+                alpha=0.9,
+            )
+        else:
+            ax2.scatter(t_jd, y_jd, s=20, color="#2e7d32", alpha=0.85, edgecolors="none")
+        ax2.set_title("Light Curve (JD)")
+        ax2.set_xlabel("JD")
+        ax2.set_ylabel("Magnitude")
+        ax2.grid(True, alpha=0.3)
+        ax2.ticklabel_format(style="plain", useOffset=False, axis="x")
+        ax2.invert_yaxis()
+
         phase2 = np.concatenate([res["phase"], res["phase"] + 1.0])
         y2 = np.concatenate([res["y_phase"], res["y_phase"]])
         model_phase2 = np.concatenate([res["model_phase"], res["model_phase"] + 1.0])
         model_mag2 = np.concatenate([res["model_mag"], res["model_mag"]])
-        ax2.scatter(phase2, y2, s=18, color="#2e7d32", alpha=0.8, edgecolors="none")
-        ax2.plot(model_phase2, model_mag2, color="#9c2f2f", lw=1.2)
-        ax2.set_xlim(0.0, 2.0)
-        ax2.set_title(
-            f"Phased Light Curve (P = {res['best_period']:.8f} d = {res['best_period_min']:.2f} min, "
-            f"T0 = JD {res['t0_phase']:.6f})"
+        ax3.scatter(phase2, y2, s=18, color="#2e7d32", alpha=0.8, edgecolors="none")
+        ax3.plot(model_phase2, model_mag2, color="#9c2f2f", lw=1.2)
+        ax3.set_xlim(0.0, 2.0)
+        ax3.set_title(
+            f"Phased Light Curve (Fold P = {res['fold_period']:.8f} d = {res['fold_period_min']:.2f} min, "
+            f"T0 min brightness = JD {res['fold_t0']:.6f})"
         )
-        ax2.set_xlabel("Phase")
-        ax2.set_ylabel("Magnitude")
-        ax2.grid(True, alpha=0.3)
-        ax2.invert_yaxis()
+        ax3.set_xlabel("Phase")
+        ax3.set_ylabel("Magnitude")
+        ax3.grid(True, alpha=0.3)
+        ax3.invert_yaxis()
 
         self.fig.tight_layout()
         self.canvas.draw_idle()
