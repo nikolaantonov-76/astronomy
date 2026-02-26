@@ -1,1 +1,9 @@
-PyTimeAltitude.settings.json
+# Ignore everything
+*
+
+# Except Python files
+!*.py
+!**/*.py
+
+# Except .gitignore itself
+!.gitignore
