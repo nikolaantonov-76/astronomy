@@ -1,0 +1,15 @@
+{
+  "star_name": "KR Aur",
+  "filt": "V",
+  "obs_code": "ANNA",
+  "input_file": "KR Aur 2026-02-18 V.tbl",
+  "chart_id": "X40996ANY",
+  "single_comp_id": "na",
+  "single_comp_name": "ENSEMBLE",
+  "comp_err": "0.05",
+  "check_id": "T4",
+  "check_name": "133",
+  "check_std_mag": "13.308",
+  "check_err": "0.029",
+  "transformed": "NO"
+}
