@@ -27,10 +27,15 @@ import tkinter as tk
 import tkinter.font as tkfont
 from astropy.timeseries import LombScargle
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.patches import Rectangle
 from tkinter import filedialog, messagebox, ttk
 
 
-FOOTER_TEXT = "Nikola Antonov (nikola.antonov@iaps.institute), https://astro.iaps.instiute"
+FOOTER_TEXT = (
+    "Nikola Antonov (nikola.antonov@iaps.institute), https://astro.iaps.institute\n"
+    "0.25-m Newtonian f/4.8, ASI553MM Pro CMOS\n"
+    "Meshtitsa, Bulgaria"
+)
 
 # Shared visual theme (same as PyAAVSOGenerator / PyAAVSOPlanner)
 _BG = "#f0f4f8"
@@ -74,6 +79,15 @@ def _axis_limits_with_margin(values, frac=0.08, min_pad=1e-6):
     else:
         pad = max(span * frac, min_pad)
     return vmin - pad, vmax + pad
+
+
+def _jd_to_calendar_date_text(jd_value) -> str:
+    try:
+        jd_float = float(jd_value)
+        dt_value = dt.datetime(1970, 1, 1) + dt.timedelta(days=jd_float - 2440588.0)
+        return dt_value.strftime("%Y-%m-%d")
+    except Exception:
+        return "n/a"
 
 
 def _set_optimal_xy_limits(ax, x_values, y_values, x_frac=0.04, y_frac=0.08):
@@ -964,6 +978,8 @@ class PeriodAnalysisGUI:
         self.root = root
         self.root.title("AAVSO Lomb-Scargle Period Analysis")
         _apply_theme(root)
+        self._scroll_canvas = None
+        self._scroll_frame = None
 
         self.vars = {
             "input_file": tk.StringVar(value=""),
@@ -998,25 +1014,69 @@ class PeriodAnalysisGUI:
     def _fit_window(self):
         self.root.update_idletasks()
         width = min(max(self.root.winfo_reqwidth(), 1060), 1360)
-        height = min(max(self.root.winfo_reqheight(), 980), 1240)
+        height = min(max(self.root.winfo_reqheight(), 720), 1100)
         self.root.geometry(f"{width}x{height}")
-        self.root.minsize(1020, 920)
+        self.root.minsize(980, 640)
+
+    def _on_scroll_frame_configure(self, _event=None):
+        if self._scroll_canvas is None or self._scroll_frame is None:
+            return
+        self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
+
+    def _on_scroll_canvas_configure(self, event):
+        if self._scroll_canvas is None or self._scroll_frame is None:
+            return
+        self._scroll_canvas.itemconfigure(self._scroll_window_id, width=event.width)
+
+    def _bind_scroll_events(self):
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self.root.bind_all("<Button-4>", self._on_mousewheel_linux, add="+")
+        self.root.bind_all("<Button-5>", self._on_mousewheel_linux, add="+")
+
+    def _on_mousewheel(self, event):
+        if self._scroll_canvas is None:
+            return
+        delta = int(-event.delta / 120) if event.delta else 0
+        if delta != 0:
+            self._scroll_canvas.yview_scroll(delta, "units")
+
+    def _on_mousewheel_linux(self, event):
+        if self._scroll_canvas is None:
+            return
+        if event.num == 4:
+            self._scroll_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self._scroll_canvas.yview_scroll(1, "units")
 
     def _build_ui(self):
+        shell = ttk.Frame(self.root)
+        shell.pack(fill="both", expand=True)
+        self._scroll_canvas = tk.Canvas(shell, bg=_BG, highlightthickness=0, borderwidth=0)
+        y_scroll = ttk.Scrollbar(shell, orient="vertical", command=self._scroll_canvas.yview)
+        self._scroll_canvas.configure(yscrollcommand=y_scroll.set)
+        self._scroll_canvas.pack(side="left", fill="both", expand=True)
+        y_scroll.pack(side="right", fill="y")
+        self._scroll_frame = ttk.Frame(self._scroll_canvas)
+        self._scroll_window_id = self._scroll_canvas.create_window((0, 0), window=self._scroll_frame, anchor="nw")
+        self._scroll_frame.bind("<Configure>", self._on_scroll_frame_configure)
+        self._scroll_canvas.bind("<Configure>", self._on_scroll_canvas_configure)
+        self._bind_scroll_events()
+
         ttk.Label(
-            self.root,
+            self._scroll_frame,
             text=FOOTER_TEXT,
             anchor="center",
             justify="center",
             foreground="#888888",
         ).pack(side="bottom", fill="x", padx=14, pady=(0, 6))
 
-        action_bar = ttk.Frame(self.root)
+        action_bar = ttk.Frame(self._scroll_frame)
         action_bar.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
         ttk.Button(action_bar, text="Save Outputs", command=self._save_outputs).pack(side="right", padx=(0, 8))
+        ttk.Button(action_bar, text="Reset", command=self._reset_loaded_data).pack(side="right", padx=(0, 8))
         ttk.Button(action_bar, text="Analyze", command=self._analyze).pack(side="right")
 
-        outer = ttk.Frame(self.root)
+        outer = ttk.Frame(self._scroll_frame)
         outer.pack(fill="both", expand=True, padx=14, pady=(14, 8))
 
         controls = ttk.LabelFrame(outer, text="Input and Search Settings", padding=10)
@@ -1182,6 +1242,108 @@ class PeriodAnalysisGUI:
             hspace=hspace,
         )
 
+    def _save_figure_with_footer(self, fig, out_path: Path, title: str = "", include_title: bool = True):
+        # Temporarily overlay export title and bottom footer ribbon during PNG save.
+        subplot_state = (
+            fig.subplotpars.left,
+            fig.subplotpars.right,
+            fig.subplotpars.top,
+            fig.subplotpars.bottom,
+            fig.subplotpars.wspace,
+            fig.subplotpars.hspace,
+        )
+        orig_size = fig.get_size_inches().copy()
+        artists = []
+        try:
+            # Keep export readable regardless of current UI tab size.
+            export_w = max(float(orig_size[0]), 12.8)
+            export_h = max(float(orig_size[1]), 7.8)
+            fig.set_size_inches(export_w, export_h, forward=False)
+
+            footer_height = 0.125
+            footer_gap = 0.08
+            export_top = min(subplot_state[2], 0.92)
+            fig.subplots_adjust(
+                top=export_top,
+                bottom=max(subplot_state[3], footer_height + footer_gap),
+                left=max(subplot_state[0], 0.09),
+                right=min(subplot_state[1], 0.97),
+            )
+            footer = Rectangle(
+                (0, 0),
+                1,
+                footer_height,
+                transform=fig.transFigure,
+                facecolor="#2f3b4d",
+                edgecolor="none",
+                alpha=0.98,
+                zorder=6,
+            )
+            artists.append(footer)
+            fig.add_artist(footer)
+            if include_title and title.strip():
+                title_y = 0.5 * (1.0 + export_top)
+                title_artist = fig.text(
+                    0.5,
+                    title_y,
+                    title,
+                    ha="center",
+                    va="center",
+                    fontsize=21,
+                    fontweight="bold",
+                    color="#111111",
+                    zorder=8,
+                )
+                artists.append(title_artist)
+            footer_artist = fig.text(
+                0.5,
+                footer_height / 2.0,
+                FOOTER_TEXT,
+                ha="center",
+                va="center",
+                fontsize=10.0,
+                color="white",
+                fontweight="bold",
+                linespacing=1.25,
+                zorder=7,
+            )
+            artists.append(footer_artist)
+            fig.savefig(out_path, dpi=180)
+        finally:
+            for artist in artists:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            fig.subplots_adjust(
+                left=subplot_state[0],
+                right=subplot_state[1],
+                top=subplot_state[2],
+                bottom=subplot_state[3],
+                wspace=subplot_state[4],
+                hspace=subplot_state[5],
+            )
+            fig.set_size_inches(orig_size[0], orig_size[1], forward=False)
+
+    def _export_filters_label(self) -> str:
+        if self.df is None or self.df.empty or "FILT" not in self.df.columns:
+            return "ALL"
+        filters = []
+        for value in self.df["FILT"].tolist():
+            token = str(value).strip().upper()
+            if token and token not in filters:
+                filters.append(token)
+        return ",".join(filters) if filters else "ALL"
+
+    def _export_calendar_date_label(self) -> str:
+        if self.df is None or self.df.empty or "DATE" not in self.df.columns:
+            return "n/a"
+        jd_values = pd.to_numeric(self.df["DATE"], errors="coerce").to_numpy(dtype=float)
+        jd_values = jd_values[np.isfinite(jd_values)]
+        if jd_values.size == 0:
+            return "n/a"
+        return _jd_to_calendar_date_text(float(np.nanmin(jd_values)))
+
     def _draw_placeholder(self):
         self.ax_light.clear()
         self.ax_light.grid(True, alpha=0.3)
@@ -1198,6 +1360,16 @@ class PeriodAnalysisGUI:
         self._apply_figure_layout(self.fig_period, hspace=0.34, top=0.95, bottom=0.09)
         self.canvas_light.draw_idle()
         self.canvas_period.draw_idle()
+
+    def _reset_loaded_data(self):
+        self.df = None
+        self.last_result = None
+        self.vars["input_file"].set("")
+        self.period_filter_combo["values"] = ["ALL"]
+        self.vars["periodogram_filter"].set("ALL")
+        self.summary_label.config(text="Load a file, then run analysis.")
+        self._draw_placeholder()
+        self.plot_tabs.select(self.tab_light)
 
     def _reset_period_views(self, ax1=None, ax3=None):
         if ax1 is None or ax3 is None:
@@ -1306,7 +1478,12 @@ class PeriodAnalysisGUI:
         t_all = work["DATE"].to_numpy(dtype=float)
         y_all = work["MAG_VALUE"].to_numpy(dtype=float)
         shown_filters = ",".join(loaded_filters) if loaded_filters else "ALL"
-        self.ax_light.set_title(f"Light Curve - {object_label} (Loaded filters: {shown_filters})", fontsize=14, pad=8)
+        date_label = _jd_to_calendar_date_text(float(np.nanmin(t_all)))
+        self.ax_light.set_title(
+            f"{object_label} | {date_label} | Filters: {shown_filters}",
+            fontsize=14,
+            pad=8,
+        )
         self.ax_light.set_xlabel("Julian Date", fontsize=14)
         self.ax_light.set_ylabel("Magnitude", fontsize=14)
         self.ax_light.tick_params(axis="both", labelsize=12)
@@ -1407,9 +1584,9 @@ class PeriodAnalysisGUI:
                     f"Available observers in range: {', '.join(observers[:20]) if observers else 'n/a'}"
                 )
 
+            # AAVSO load overrides any existing file-loaded dataset.
+            self._reset_loaded_data()
             self.df = df_online
-            self.last_result = None
-            self.vars["input_file"].set("")
             filters = sorted({str(v).strip().upper() for v in self.df["FILT"] if str(v).strip()})
             self.period_filter_combo["values"] = filters if filters else ["ALL"]
 
@@ -1436,10 +1613,12 @@ class PeriodAnalysisGUI:
         )
         if not selected:
             return
-        self.vars["input_file"].set(selected)
         try:
-            self.df = read_aavso_extended(selected)
-            self.last_result = None
+            loaded_df = read_aavso_extended(selected)
+            # File load overrides any existing AAVSO-loaded dataset.
+            self._reset_loaded_data()
+            self.vars["input_file"].set(selected)
+            self.df = loaded_df
             filters = sorted({str(v).strip().upper() for v in self.df["FILT"] if str(v).strip()})
             self.period_filter_combo["values"] = filters if filters else ["ALL"]
             self.vars["periodogram_filter"].set(filters[0] if filters else "ALL")
@@ -1450,10 +1629,6 @@ class PeriodAnalysisGUI:
             self.canvas_period.draw_idle()
             self.plot_tabs.select(self.tab_light)
         except Exception as exc:
-            self.df = None
-            self.last_result = None
-            self.period_filter_combo["values"] = ["ALL"]
-            self.vars["periodogram_filter"].set("ALL")
             messagebox.showerror("Load Error", str(exc))
 
     def _analyze(self):
@@ -1581,8 +1756,31 @@ class PeriodAnalysisGUI:
             # Screens
             light_png = out_path / f"{prefix}_light_curve.png"
             period_png = out_path / f"{prefix}_periodogram_phase.png"
-            self.fig_light.savefig(light_png, dpi=180, bbox_inches="tight", pad_inches=0.2)
-            self.fig_period.savefig(period_png, dpi=180, bbox_inches="tight", pad_inches=0.2)
+            filters_label = self._export_filters_label()
+            date_label = self._export_calendar_date_label()
+            base_title = f"{object_label} | {date_label} | Filters: {filters_label}"
+            # For Light Curve export, render one bold figure-level title in the top header band.
+            original_light_title = self.ax_light.get_title()
+            try:
+                self.ax_light.set_title("")
+                self._save_figure_with_footer(
+                    self.fig_light,
+                    light_png,
+                    base_title,
+                    include_title=True,
+                )
+            finally:
+                self.ax_light.set_title(original_light_title)
+
+            if self.last_result is not None:
+                period_title = f"{base_title} | Lomb-Scargle Periodogram"
+            else:
+                period_title = f"{base_title} | Periodogram/Phase"
+            self._save_figure_with_footer(
+                self.fig_period,
+                period_png,
+                period_title,
+            )
 
             # Loaded data
             loaded_csv = out_path / f"{prefix}_loaded_data.csv"
@@ -1749,6 +1947,12 @@ class PeriodAnalysisGUI:
         self.canvas_period.draw_idle()
 
     def _on_close(self):
+        try:
+            self.root.unbind_all("<MouseWheel>")
+            self.root.unbind_all("<Button-4>")
+            self.root.unbind_all("<Button-5>")
+        except Exception:
+            pass
         try:
             plt.close(self.fig_light)
             plt.close(self.fig_period)
