@@ -1,9 +1,11 @@
 """
-Apply BV/BVR transformation coefficients to AAVSO Extended File Format exports and save transformed outputs.
+Apply BV/BVR/UBV/UBVR transformation coefficients to AAVSO Extended File Format exports
+and save transformed outputs.
 
 Usage:
 1. Run: `python astronomy/PyTransformApplier.py`
-2. Select BV or BVR mode and provide B/V(/R) files plus the `VPhot.ini` coefficients file.
+2. Select scenario (BV, BVR, UBV, UBVR) and provide the required filter files
+   plus the `VPhot.ini` coefficients file.
 3. Click `Execute` to create transformed `.xlsx`, `.txt`, and light-curve `.png` files.
 
 Author: Nikola Antonov
@@ -39,14 +41,12 @@ def _apply_theme(root) -> None:
     """Apply consistent soft-blue theme to the given root window."""
     import tkinter.font as tkfont
 
-    # 1. Activate clam theme FIRST (resets everything, so must come before customising)
     style = ttk.Style(root)
     try:
         style.theme_use("clam")
     except Exception:
         pass
 
-    # 2. Reconfigure every named system font explicitly
     _F  = ("Segoe UI", 10)
     _FM = ("Segoe UI", 10, "bold")
     _FC = ("Consolas", 10)
@@ -61,7 +61,6 @@ def _apply_theme(root) -> None:
     except Exception:
         pass
 
-    # 3. option_add with "interactive" priority overrides all lower-priority theme defaults
     root.option_add("*Font",        _F,  "interactive")
     root.option_add("*Text.Font",   _FC, "interactive")
     root.option_add("*Label.Font",  _F,  "interactive")
@@ -69,8 +68,6 @@ def _apply_theme(root) -> None:
     root.option_add("*Entry.Font",  _F,  "interactive")
     root.option_add("*Menu.Font",   _F,  "interactive")
 
-    # 4. Configure every ttk widget type explicitly with font
-    #    (style root "." alone does not cascade reliably in clam)
     style.configure(".",                 font=_F,  background=_BG, foreground=_TEXT)
     style.configure("TFrame",            background=_BG)
     style.configure("TLabel",            font=_F,  background=_BG, foreground=_TEXT)
@@ -95,6 +92,11 @@ def _apply_theme(root) -> None:
 
 
 def parse_notes_column(df):
+    """
+    Extract VarInstMag (VMAGINS), CompInstMag (CMAGINS), and CompCatMag (CREFMAG)
+    from the NOTES column.  These keys are written by AIJ regardless of the active
+    filter, so the same parser works for U, B, V, R frames.
+    """
     def extract_mags(notes):
         kv = dict(
             re.findall(r"(VMAGINS|CMAGINS|CREFMAG)=([-+]?[0-9]*\.?[0-9]+)", str(notes))
@@ -109,9 +111,7 @@ def parse_notes_column(df):
 
 def load_aij_file(filepath):
     df = pd.read_csv(filepath, names=aij_columns, comment="#")
-    # DATE must be numeric (JD) to compute nearest-frame matches
     df["DATE"] = pd.to_numeric(df["DATE"], errors="coerce")
-    # Remove potential trailing/leading spaces in FILT after CSV parsing
     df["FILT"] = df["FILT"].astype(str).str.strip()
     df = parse_notes_column(df)
     df["Err"] = pd.to_numeric(df["MERR"], errors="coerce")
@@ -122,20 +122,27 @@ def load_transform_coeffs(ini_file):
     config = configparser.ConfigParser()
     config.optionxform = str
     config.read(ini_file)
+    c = config["Coefficients"]
     return {
-        "Tbv":   float(config["Coefficients"]["Tbv"]),
-        "Tv_bv": float(config["Coefficients"]["Tv_bv"]),
-        "Tb_bv": float(config["Coefficients"].get("Tb_bv", 0.0)),
-        "Tvr":   float(config["Coefficients"].get("Tvr", 0.0)),
-        "Tr_vr": float(config["Coefficients"].get("Tr_vr", 0.0)),
-        "Tv_vr": float(config["Coefficients"].get("Tv_vr", 0.0)),
+        # BV
+        "Tbv":   float(c["Tbv"]),
+        "Tv_bv": float(c["Tv_bv"]),
+        "Tb_bv": float(c.get("Tb_bv", 0.0)),
+        # BVR
+        "Tvr":   float(c.get("Tvr", 0.0)),
+        "Tr_vr": float(c.get("Tr_vr", 0.0)),
+        "Tv_vr": float(c.get("Tv_vr", 0.0)),
+        # UBV — Tub is the U colour coefficient (analogous to Tbv for B)
+        #        Tu_ub is the U band coefficient  (analogous to Tv_bv for V)
+        "Tub":   float(c.get("Tub",   0.0)),
+        "Tu_ub": float(c.get("Tu_ub", 0.0)),
     }
 
 
 def find_nearest(df_ref, target_date, max_minutes):
     """
     Return the nearest row in df_ref to target_date.
-    If the time gap is above max_minutes, return (None, diff_minutes).
+    If the time gap exceeds max_minutes, return (None, diff_minutes).
     """
     diffs = (df_ref["DATE"] - target_date).abs()
     idx = diffs.idxmin()
@@ -145,35 +152,64 @@ def find_nearest(df_ref, target_date, max_minutes):
     return df_ref.loc[idx], diff_minutes
 
 
+# ── Error propagation ──────────────────────────────────────────────────────
+
 def propagate_r_error(sigma_r, sigma_v, sigma_b, tvr):
     """
-    Propagate photometric errors through the BVR transformation for the R band.
+    sigma_R = sqrt( (Tvr*sigma_r)^2 + sigma_v^2 + sigma_b^2 )
 
-    The transformed R magnitude depends on the R, V and B instrumental
-    measurements:
-        R_std = V_std + (rc_cat - vc_cat) - Tvr * ((vs - rs) - (vc - rc))
-
-    Taking partial derivatives and adding in quadrature gives:
-        σ_R_trans = √( (Tvr·σ_r)² + σ_v² + σ_b² )
-
-    where σ_b enters because V_std itself was derived from the BV
-    transformation.  B and V errors are unchanged by their own
-    transformations (Tv_bv is small and does not feed back into their
-    error budgets at the level of precision reported here).
-
-    Parameters
-    ----------
-    sigma_r : float  – original R MERR
-    sigma_v : float  – MERR of the matched V frame
-    sigma_b : float  – MERR of the matched B frame
-    tvr     : float  – Tvr transformation coefficient
-
-    Returns
-    -------
-    float – propagated MERR rounded to 3 decimal places
+    sigma_b and sigma_v enter because R_std is anchored on V_std which itself
+    was derived from the BV transformation.
     """
     return round(math.sqrt((tvr * sigma_r) ** 2 + sigma_v ** 2 + sigma_b ** 2), 3)
 
+
+def propagate_u_error(sigma_u, sigma_b, sigma_v, tub):
+    """
+    sigma_U = sqrt( (Tub*sigma_u)^2 + sigma_b^2 + sigma_v^2 )
+
+    U_std is anchored on B_std (hence sigma_b), which in turn was derived
+    from V_std (hence sigma_v), so both propagate into the final U uncertainty.
+
+    With Tub ~= 1 and Tu_ub ~= 0.05 the dominant terms are sigma_u and sigma_b.
+    """
+    return round(math.sqrt((tub * sigma_u) ** 2 + sigma_b ** 2 + sigma_v ** 2), 3)
+
+
+# ── BV shared helper ───────────────────────────────────────────────────────
+
+def _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs, n=6):
+    """Run the BV iterative loop and return (bs_std, vs_std)."""
+    bs_std, vs_std = bs, vs
+    for _ in range(n):
+        bs_std = vs_std + (bc_cat - vc_cat) + coeffs["Tbv"] * ((bs - vs) - (bc - vc))
+        vs_std = vs + (vc_cat - vc) + coeffs["Tv_bv"] * (
+            (bs_std - vs_std) - (bc_cat - vc_cat)
+        )
+    return bs_std, vs_std
+
+
+# ── U computation ──────────────────────────────────────────────────────────
+
+def _compute_u_std(us, uc, uc_cat, bs, bc, bc_cat, bs_std, coeffs):
+    """
+    Compute U_std anchored on the already-converged B_std.
+
+    Equation (analogous to B anchored on V in the BV transform):
+        U_std = B_std + (uc_cat - bc_cat) + Tub * ((us - bs) - (uc - bc))
+
+    A small Tu_ub band correction is then applied:
+        U_std += Tu_ub * ((U_std - B_std) - (uc_cat - bc_cat))
+
+    With Tu_ub = 0.052 the correction is < 0.001 mag for typical (U-B)
+    colour ranges, but is included for completeness.
+    """
+    us_std = bs_std + (uc_cat - bc_cat) + coeffs["Tub"] * ((us - bs) - (uc - bc))
+    us_std += coeffs["Tu_ub"] * ((us_std - bs_std) - (uc_cat - bc_cat))
+    return us_std
+
+
+# ── BV ─────────────────────────────────────────────────────────────────────
 
 def iterative_transform_bv(df_b, df_v, coeffs, max_minutes, warnings):
     results = []
@@ -192,12 +228,7 @@ def iterative_transform_bv(df_b, df_v, coeffs, max_minutes, warnings):
 
         bs, bc, bc_cat = b_match["VarInstMag"], b_match["CompInstMag"], b_match["CompCatMag"]
         vs, vc, vc_cat = v["VarInstMag"], v["CompInstMag"], v["CompCatMag"]
-        bs_std, vs_std = bs, vs
-        for _ in range(6):
-            bs_std = vs_std + (bc_cat - vc_cat) + coeffs["Tbv"] * ((bs - vs) - (bc - vc))
-            vs_std = vs + (vc_cat - vc) + coeffs["Tv_bv"] * (
-                (bs_std - vs_std) - (bc_cat - vc_cat)
-            )
+        _, vs_std = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
         row = v.copy(); row["MAG_ORIG"] = row["MAG"]
         row["MAG"] = round(vs_std, 3); row["TRANS"] = "YES"
         results.append(row)
@@ -214,18 +245,15 @@ def iterative_transform_bv(df_b, df_v, coeffs, max_minutes, warnings):
 
         bs, bc, bc_cat = b["VarInstMag"], b["CompInstMag"], b["CompCatMag"]
         vs, vc, vc_cat = v_match["VarInstMag"], v_match["CompInstMag"], v_match["CompCatMag"]
-        bs_std, vs_std = bs, vs
-        for _ in range(6):
-            bs_std = vs_std + (bc_cat - vc_cat) + coeffs["Tbv"] * ((bs - vs) - (bc - vc))
-            vs_std = vs + (vc_cat - vc) + coeffs["Tv_bv"] * (
-                (bs_std - vs_std) - (bc_cat - vc_cat)
-            )
+        bs_std, _ = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
         row = b.copy(); row["MAG_ORIG"] = row["MAG"]
         row["MAG"] = round(bs_std, 3); row["TRANS"] = "YES"
         results.append(row)
 
     return pd.DataFrame(results).sort_values(by="DATE").reset_index(drop=True)
 
+
+# ── BVR ────────────────────────────────────────────────────────────────────
 
 def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
     results = []
@@ -245,12 +273,7 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
 
         bs, bc, bc_cat = b_match["VarInstMag"], b_match["CompInstMag"], b_match["CompCatMag"]
         vs, vc, vc_cat = v["VarInstMag"], v["CompInstMag"], v["CompCatMag"]
-        bs_std, vs_std = bs, vs
-        for _ in range(6):
-            bs_std = vs_std + (bc_cat - vc_cat) + coeffs["Tbv"] * ((bs - vs) - (bc - vc))
-            vs_std = vs + (vc_cat - vc) + coeffs["Tv_bv"] * (
-                (bs_std - vs_std) - (bc_cat - vc_cat)
-            )
+        _, vs_std = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
         row = v.copy(); row["MAG_ORIG"] = row["MAG"]
         row["MAG"] = round(vs_std, 3); row["TRANS"] = "YES"
         results.append(row)
@@ -267,12 +290,7 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
 
         bs, bc, bc_cat = b["VarInstMag"], b["CompInstMag"], b["CompCatMag"]
         vs, vc, vc_cat = v_match["VarInstMag"], v_match["CompInstMag"], v_match["CompCatMag"]
-        bs_std, vs_std = bs, vs
-        for _ in range(6):
-            bs_std = vs_std + (bc_cat - vc_cat) + coeffs["Tbv"] * ((bs - vs) - (bc - vc))
-            vs_std = vs + (vc_cat - vc) + coeffs["Tv_bv"] * (
-                (bs_std - vs_std) - (bc_cat - vc_cat)
-            )
+        bs_std, _ = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
         row = b.copy(); row["MAG_ORIG"] = row["MAG"]
         row["MAG"] = round(bs_std, 3); row["TRANS"] = "YES"
         results.append(row)
@@ -295,22 +313,15 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
         rs, rc, rc_cat = r["VarInstMag"], r["CompInstMag"], r["CompCatMag"]
         vs, vc, vc_cat = v_match["VarInstMag"], v_match["CompInstMag"], v_match["CompCatMag"]
         bs, bc, bc_cat = b_match["VarInstMag"], b_match["CompInstMag"], b_match["CompCatMag"]
-        bs_std, vs_std, rs_std = bs, vs, rs
-        for _ in range(6):
-            bs_std = vs_std + (bc_cat - vc_cat) + coeffs["Tbv"] * ((bs - vs) - (bc - vc))
-            vs_std = vs + (vc_cat - vc) + coeffs["Tv_bv"] * (
-                (bs_std - vs_std) - (bc_cat - vc_cat)
-            )
-            rs_std = vs_std - (vc_cat - rc_cat) - coeffs["Tvr"] * ((vs - rs) - (vc - rc))
+        bs_std, vs_std = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
+        rs_std = vs_std - (vc_cat - rc_cat) - coeffs["Tvr"] * ((vs - rs) - (vc - rc))
 
-        # Propagate photometric errors: σ_R = √((Tvr·σ_r)² + σ_v² + σ_b²)
         new_merr = propagate_r_error(
             sigma_r=float(r["Err"]),
             sigma_v=float(v_match["Err"]),
             sigma_b=float(b_match["Err"]),
             tvr=coeffs["Tvr"],
         )
-
         row = r.copy(); row["MAG_ORIG"] = row["MAG"]
         row["MAG"]  = round(rs_std, 3)
         row["MERR"] = str(new_merr)
@@ -320,6 +331,144 @@ def iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings):
 
     return pd.DataFrame(results).sort_values(by="DATE").reset_index(drop=True)
 
+
+# ── UBV ────────────────────────────────────────────────────────────────────
+
+def iterative_transform_ubv(df_u, df_b, df_v, coeffs, max_minutes, warnings):
+    results = []
+    df_u_only = df_u[df_u["FILT"] == "U"]
+    df_b_only = df_b[df_b["FILT"] == "B"]
+    df_v_only = df_v[df_v["FILT"] == "V"]
+
+    # ── V frames ────────────────────────────────────────────────────────
+    for _, v in df_v_only.iterrows():
+        b_match, diff = find_nearest(df_b_only, v["DATE"], max_minutes)
+        if b_match is None:
+            warnings.append(
+                f"V frame JD={v['DATE']:.6f}: no B frame within {max_minutes} min "
+                f"(nearest is {diff:.1f} min) - saved as UNTRANSFORMED"
+            )
+            row = v.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
+            results.append(row); continue
+
+        bs, bc, bc_cat = b_match["VarInstMag"], b_match["CompInstMag"], b_match["CompCatMag"]
+        vs, vc, vc_cat = v["VarInstMag"], v["CompInstMag"], v["CompCatMag"]
+        _, vs_std = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
+        row = v.copy(); row["MAG_ORIG"] = row["MAG"]
+        row["MAG"] = round(vs_std, 3); row["TRANS"] = "YES"
+        results.append(row)
+
+    # ── B frames ────────────────────────────────────────────────────────
+    for _, b in df_b_only.iterrows():
+        v_match, diff = find_nearest(df_v_only, b["DATE"], max_minutes)
+        if v_match is None:
+            warnings.append(
+                f"B frame JD={b['DATE']:.6f}: no V frame within {max_minutes} min "
+                f"(nearest is {diff:.1f} min) - saved as UNTRANSFORMED"
+            )
+            row = b.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
+            results.append(row); continue
+
+        bs, bc, bc_cat = b["VarInstMag"], b["CompInstMag"], b["CompCatMag"]
+        vs, vc, vc_cat = v_match["VarInstMag"], v_match["CompInstMag"], v_match["CompCatMag"]
+        bs_std, _ = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
+        row = b.copy(); row["MAG_ORIG"] = row["MAG"]
+        row["MAG"] = round(bs_std, 3); row["TRANS"] = "YES"
+        results.append(row)
+
+    # ── U frames: BV converges on nearest B+V, then U anchors on B_std ─
+    for _, u in df_u_only.iterrows():
+        b_match, b_diff = find_nearest(df_b_only, u["DATE"], max_minutes)
+        v_match, v_diff = find_nearest(df_v_only, u["DATE"], max_minutes)
+
+        if b_match is None or v_match is None:
+            missing = []
+            if b_match is None: missing.append(f"B ({b_diff:.1f} min)")
+            if v_match is None: missing.append(f"V ({v_diff:.1f} min)")
+            warnings.append(
+                f"U frame JD={u['DATE']:.6f}: no {' and '.join(missing)} frame within "
+                f"{max_minutes} min - saved as UNTRANSFORMED"
+            )
+            row = u.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
+            results.append(row); continue
+
+        us, uc, uc_cat = u["VarInstMag"], u["CompInstMag"], u["CompCatMag"]
+        bs, bc, bc_cat = b_match["VarInstMag"], b_match["CompInstMag"], b_match["CompCatMag"]
+        vs, vc, vc_cat = v_match["VarInstMag"], v_match["CompInstMag"], v_match["CompCatMag"]
+
+        bs_std, vs_std = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
+        us_std = _compute_u_std(us, uc, uc_cat, bs, bc, bc_cat, bs_std, coeffs)
+
+        new_merr = propagate_u_error(
+            sigma_u=float(u["Err"]),
+            sigma_b=float(b_match["Err"]),
+            sigma_v=float(v_match["Err"]),
+            tub=coeffs["Tub"],
+        )
+        row = u.copy(); row["MAG_ORIG"] = row["MAG"]
+        row["MAG"]  = round(us_std, 3)
+        row["MERR"] = str(new_merr)
+        row["Err"]  = new_merr
+        row["TRANS"] = "YES"
+        results.append(row)
+
+    return pd.DataFrame(results).sort_values(by="DATE").reset_index(drop=True)
+
+
+# ── UBVR ───────────────────────────────────────────────────────────────────
+
+def iterative_transform_ubvr(df_u, df_b, df_v, df_r, coeffs, max_minutes, warnings):
+    """
+    Transform all four bands.  B, V and R follow the BVR logic;
+    U is added as a fourth pass anchored on B_std (itself derived from V_std).
+    """
+    bvr_results = iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings)
+
+    df_u_only = df_u[df_u["FILT"] == "U"]
+    df_b_only = df_b[df_b["FILT"] == "B"]
+    df_v_only = df_v[df_v["FILT"] == "V"]
+
+    u_results = []
+    for _, u in df_u_only.iterrows():
+        b_match, b_diff = find_nearest(df_b_only, u["DATE"], max_minutes)
+        v_match, v_diff = find_nearest(df_v_only, u["DATE"], max_minutes)
+
+        if b_match is None or v_match is None:
+            missing = []
+            if b_match is None: missing.append(f"B ({b_diff:.1f} min)")
+            if v_match is None: missing.append(f"V ({v_diff:.1f} min)")
+            warnings.append(
+                f"U frame JD={u['DATE']:.6f}: no {' and '.join(missing)} frame within "
+                f"{max_minutes} min - saved as UNTRANSFORMED"
+            )
+            row = u.copy(); row["MAG_ORIG"] = row["MAG"]; row["TRANS"] = "NO"
+            u_results.append(row); continue
+
+        us, uc, uc_cat = u["VarInstMag"], u["CompInstMag"], u["CompCatMag"]
+        bs, bc, bc_cat = b_match["VarInstMag"], b_match["CompInstMag"], b_match["CompCatMag"]
+        vs, vc, vc_cat = v_match["VarInstMag"], v_match["CompInstMag"], v_match["CompCatMag"]
+
+        bs_std, vs_std = _bv_converge(bs, vs, bc, vc, bc_cat, vc_cat, coeffs)
+        us_std = _compute_u_std(us, uc, uc_cat, bs, bc, bc_cat, bs_std, coeffs)
+
+        new_merr = propagate_u_error(
+            sigma_u=float(u["Err"]),
+            sigma_b=float(b_match["Err"]),
+            sigma_v=float(v_match["Err"]),
+            tub=coeffs["Tub"],
+        )
+        row = u.copy(); row["MAG_ORIG"] = row["MAG"]
+        row["MAG"]  = round(us_std, 3)
+        row["MERR"] = str(new_merr)
+        row["Err"]  = new_merr
+        row["TRANS"] = "YES"
+        u_results.append(row)
+
+    combined = pd.concat([bvr_results, pd.DataFrame(u_results)], ignore_index=True)
+    return combined.sort_values(by="DATE").reset_index(drop=True)
+
+
+# ── Output helpers ─────────────────────────────────────────────────────────
 
 def save_to_excel(df, output_path):
     df.to_excel(output_path, index=False)
@@ -356,7 +505,7 @@ def save_transformed_txt(df, v_header_source, filters):
 def plot_light_curve(df, output_filename, show_plot=False):
     object_name = df["Name"].dropna().unique()[0]
     filters = sorted(df["FILT"].unique())
-    filter_colors = {"B": "blue", "V": "green", "R": "red"}
+    filter_colors = {"U": "purple", "B": "blue", "V": "green", "R": "red"}
 
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, ax = plt.subplots(figsize=(12, 8))
@@ -384,7 +533,9 @@ def plot_light_curve(df, output_filename, show_plot=False):
     print(f"Light curve plot saved as: {output_filename}")
 
 
-def run_transform(scenario, b_file, v_file, r_file, ini_file, max_minutes):
+# ── Orchestration ──────────────────────────────────────────────────────────
+
+def run_transform(scenario, u_file, b_file, v_file, r_file, ini_file, max_minutes):
     df_b = load_aij_file(b_file)
     df_v = load_aij_file(v_file)
     coeffs = load_transform_coeffs(ini_file)
@@ -393,15 +544,27 @@ def run_transform(scenario, b_file, v_file, r_file, ini_file, max_minutes):
     if scenario == "BV":
         df_transformed = iterative_transform_bv(df_b, df_v, coeffs, max_minutes, warnings)
         filters = "BV"
-    else:
+    elif scenario == "BVR":
         df_r = load_aij_file(r_file)
         df_transformed = iterative_transform_bvr(df_b, df_v, df_r, coeffs, max_minutes, warnings)
         filters = "BVR"
+    elif scenario == "UBV":
+        df_u = load_aij_file(u_file)
+        df_transformed = iterative_transform_ubv(df_u, df_b, df_v, coeffs, max_minutes, warnings)
+        filters = "UBV"
+    elif scenario == "UBVR":
+        df_u = load_aij_file(u_file)
+        df_r = load_aij_file(r_file)
+        df_transformed = iterative_transform_ubvr(
+            df_u, df_b, df_v, df_r, coeffs, max_minutes, warnings
+        )
+        filters = "UBVR"
+    else:
+        raise ValueError(f"Unknown scenario: {scenario}")
 
     if df_transformed.empty:
         raise ValueError("No transformed data was produced.")
 
-    # All output files use the observation date derived from the first frame
     object_name = str(df_transformed["Name"].dropna().unique()[0]).replace(" ", "_")
     obs_date = obs_date_from_df(df_transformed)
     output_excel = f"{object_name}_{obs_date}_{filters}.xlsx"
@@ -413,6 +576,8 @@ def run_transform(scenario, b_file, v_file, r_file, ini_file, max_minutes):
     return output_excel, output_txt, output_plot, warnings
 
 
+# ── GUI ────────────────────────────────────────────────────────────────────
+
 class SettingsDialog(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -421,6 +586,7 @@ class SettingsDialog(tk.Tk):
         _apply_theme(self)
 
         self.scenario_var    = tk.StringVar(value="BVR")
+        self.u_file_var      = tk.StringVar(value="U.txt")
         self.b_file_var      = tk.StringVar(value="B.txt")
         self.v_file_var      = tk.StringVar(value="V.txt")
         self.r_file_var      = tk.StringVar(value="R.txt")
@@ -432,10 +598,10 @@ class SettingsDialog(tk.Tk):
         self._build_ui()
         self._load_saved_settings()
         self._refresh_coefficients_table()
-        self._toggle_r_controls()
+        self._toggle_filter_controls()
         self.update_idletasks()
         w = min(max(self.winfo_reqwidth(),  700), 860)
-        h = min(max(self.winfo_reqheight(), 520), 660)
+        h = min(max(self.winfo_reqheight(), 560), 700)
         self.geometry(f"{w}x{h}")
         self.minsize(w, h)
 
@@ -448,30 +614,31 @@ class SettingsDialog(tk.Tk):
         ttk.Label(frame, text="Scenario").grid(row=0, column=0, sticky="w", pady=4)
         scenario_combo = ttk.Combobox(
             frame, textvariable=self.scenario_var,
-            values=["BV", "BVR"], state="readonly", width=12,
+            values=["BV", "BVR", "UBV", "UBVR"], state="readonly", width=12,
         )
         scenario_combo.grid(row=0, column=1, sticky="w", pady=4)
-        scenario_combo.bind("<<ComboboxSelected>>", lambda _: self._toggle_r_controls())
+        scenario_combo.bind("<<ComboboxSelected>>", lambda _: self._toggle_filter_controls())
 
-        self._add_file_row(frame, 1, "B file", self.b_file_var)
-        self._add_file_row(frame, 2, "V file", self.v_file_var)
-        self.r_entry, self.r_button = self._add_file_row(frame, 3, "R file", self.r_file_var)
-        self._add_file_row(frame, 4, "INI file", self.ini_file_var)
+        self.u_entry, self.u_button = self._add_file_row(frame, 1, "U file", self.u_file_var)
+        self._add_file_row(frame, 2, "B file", self.b_file_var)
+        self._add_file_row(frame, 3, "V file", self.v_file_var)
+        self.r_entry, self.r_button = self._add_file_row(frame, 4, "R file", self.r_file_var)
+        self._add_file_row(frame, 5, "INI file", self.ini_file_var)
         ttk.Button(frame, text="Save INI", command=self._save_ini_setting).grid(
-            row=4, column=3, sticky="w", pady=4
+            row=5, column=3, sticky="w", pady=4
         )
 
-        ttk.Label(frame, text="Max match (min)").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Max match (min)").grid(row=6, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.max_minutes_var, width=12).grid(
-            row=5, column=1, sticky="w", pady=4)
+            row=6, column=1, sticky="w", pady=4)
         ttk.Label(frame, text="Frames outside threshold -> TRANS=NO", foreground="#777777").grid(
-            row=5, column=2, sticky="w", padx=(8, 0))
+            row=6, column=2, sticky="w", padx=(8, 0))
 
-        ttk.Label(frame, text="Loaded coefficients").grid(row=6, column=0, sticky="nw", pady=(10, 4))
+        ttk.Label(frame, text="Loaded coefficients").grid(row=7, column=0, sticky="nw", pady=(10, 4))
         table_frame = ttk.Frame(frame)
-        table_frame.grid(row=6, column=1, columnspan=3, sticky="we", pady=(10, 4))
+        table_frame.grid(row=7, column=1, columnspan=3, sticky="we", pady=(10, 4))
         columns = ("coefficient", "value", "error", "r2")
-        self.coeffs_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=5)
+        self.coeffs_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=6)
         self.coeffs_table.heading("coefficient", text="Coefficient")
         self.coeffs_table.heading("value", text="Value")
         self.coeffs_table.heading("error", text="Error")
@@ -485,18 +652,18 @@ class SettingsDialog(tk.Tk):
         self.coeffs_table.configure(yscrollcommand=table_scroll.set)
         table_scroll.grid(row=0, column=1, sticky="ns")
         ttk.Label(frame, textvariable=self.coeffs_status_var, foreground="#888888").grid(
-            row=7, column=1, columnspan=3, sticky="w"
+            row=8, column=1, columnspan=3, sticky="w"
         )
 
         ttk.Button(frame, text="Execute", command=self._execute).grid(
-            row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+            row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         ttk.Label(
             frame,
             text=FOOTER_TEXT,
             anchor="center",
             justify="center",
             foreground="#888888",
-        ).grid(row=9, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ).grid(row=10, column=0, columnspan=4, sticky="ew", pady=(8, 0))
 
     def _add_file_row(self, parent, row, label, variable):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
@@ -539,19 +706,16 @@ class SettingsDialog(tk.Tk):
                 if config.has_section("R Squared Values")
                 else {}
             )
-
             for key, coeff_raw in coeffs.items():
                 coeff_val = float(coeff_raw)
                 err_raw = errors.get(key, "")
-                r2_raw = r2_vals.get(key, "")
+                r2_raw  = r2_vals.get(key, "")
                 err_val = f"{float(err_raw):.3f}" if err_raw.strip() else "n/a"
-                r2_val = f"{float(r2_raw):.3f}" if r2_raw.strip() else "n/a"
+                r2_val  = f"{float(r2_raw):.3f}"  if r2_raw.strip()  else "n/a"
                 self.coeffs_table.insert(
-                    "",
-                    "end",
+                    "", "end",
                     values=(key, f"{coeff_val:.3f}", err_val, r2_val),
                 )
-
             self.coeffs_status_var.set(f"Coefficients loaded from: {ini_path}")
         except Exception as exc:
             self.coeffs_status_var.set(f"Coefficients: failed to parse INI ({exc})")
@@ -567,7 +731,6 @@ class SettingsDialog(tk.Tk):
                 self.ini_file_var.set(saved_ini)
                 self._refresh_coefficients_table()
         except Exception:
-            # Ignore settings read errors and keep defaults.
             return
 
     def _save_ini_setting(self):
@@ -575,7 +738,6 @@ class SettingsDialog(tk.Tk):
         if not ini_path:
             messagebox.showerror("Invalid input", "INI file path is empty.")
             return
-
         config = configparser.ConfigParser()
         config["Settings"] = {"ini_file": ini_path}
         try:
@@ -586,13 +748,18 @@ class SettingsDialog(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Save failed", str(exc))
 
-    def _toggle_r_controls(self):
-        state = "normal" if self.scenario_var.get() == "BVR" else "disabled"
-        self.r_entry.configure(state=state)
-        self.r_button.configure(state=state)
+    def _toggle_filter_controls(self):
+        scenario = self.scenario_var.get()
+        u_state = "normal" if scenario in ("UBV", "UBVR") else "disabled"
+        r_state = "normal" if scenario in ("BVR", "UBVR") else "disabled"
+        self.u_entry.configure(state=u_state)
+        self.u_button.configure(state=u_state)
+        self.r_entry.configure(state=r_state)
+        self.r_button.configure(state=r_state)
 
     def _execute(self):
         scenario = self.scenario_var.get()
+        u_file   = self.u_file_var.get().strip()
         b_file   = self.b_file_var.get().strip()
         v_file   = self.v_file_var.get().strip()
         r_file   = self.r_file_var.get().strip()
@@ -607,8 +774,10 @@ class SettingsDialog(tk.Tk):
             return
 
         required_paths = {"B file": b_file, "V file": v_file, "INI file": ini_file}
-        if scenario == "BVR":
+        if scenario in ("BVR", "UBVR"):
             required_paths["R file"] = r_file
+        if scenario in ("UBV", "UBVR"):
+            required_paths["U file"] = u_file
 
         missing = [name for name, path in required_paths.items()
                    if not path or not Path(path).is_file()]
@@ -619,8 +788,10 @@ class SettingsDialog(tk.Tk):
 
         try:
             output_excel, output_txt, output_plot, warns = run_transform(
-                scenario=scenario, b_file=b_file, v_file=v_file,
-                r_file=r_file, ini_file=ini_file, max_minutes=max_minutes,
+                scenario=scenario,
+                u_file=u_file, b_file=b_file, v_file=v_file,
+                r_file=r_file, ini_file=ini_file,
+                max_minutes=max_minutes,
             )
         except Exception as exc:
             messagebox.showerror("Execution failed", str(exc))
