@@ -467,7 +467,10 @@ def build_df_from_aavso_rows(rows, filt: str, observer: str, start_date: str, en
     obs_norm = _normalize_observer_code(observer)
     if obs_norm in {"", "ALL", "*"}:
         obs_norm = ""
-    jd_start, jd_end = _utc_day_to_jd_bounds(start_date, end_date)
+    jd_start = -float("inf")
+    jd_end = float("inf")
+    if start_date and end_date:
+        jd_start, jd_end = _utc_day_to_jd_bounds(start_date, end_date)
 
     out_rows = []
     for row in rows:
@@ -812,8 +815,7 @@ def run_lomb_scargle(
     filt: str,
     min_period: float,
     max_period: float,
-    samples_per_peak: int,
-    nyquist_factor: float,
+    steps: int,
     use_errors: bool,
     exclude_limits: bool,
     ls_method: str,
@@ -860,26 +862,19 @@ def run_lomb_scargle(
     )
     min_freq = 1.0 / max_period
     max_freq = 1.0 / min_period
+    if steps < 2:
+        raise ValueError("Steps must be at least 2.")
+    freq_grid = np.linspace(min_freq, max_freq, int(steps), dtype=float)
     used_ls_method = ls_method
     try:
-        freq, power = ls.autopower(
-            minimum_frequency=min_freq,
-            maximum_frequency=max_freq,
-            samples_per_peak=int(samples_per_peak),
-            nyquist_factor=float(nyquist_factor),
-            method=ls_method,
-        )
+        power = ls.power(freq_grid, method=ls_method)
+        freq = freq_grid
     except ModuleNotFoundError as exc:
         if "scipy" not in str(exc).lower():
             raise
         used_ls_method = "fast"
-        freq, power = ls.autopower(
-            minimum_frequency=min_freq,
-            maximum_frequency=max_freq,
-            samples_per_peak=int(samples_per_peak),
-            nyquist_factor=float(nyquist_factor),
-            method=used_ls_method,
-        )
+        power = ls.power(freq_grid, method=used_ls_method)
+        freq = freq_grid
     if len(freq) == 0:
         raise ValueError("Frequency grid is empty. Adjust the period bounds.")
 
@@ -986,8 +981,7 @@ class PeriodAnalysisGUI:
             "periodogram_filter": tk.StringVar(value="ALL"),
             "min_period": tk.StringVar(value="0.03"),
             "max_period": tk.StringVar(value="10.0"),
-            "samples_per_peak": tk.StringVar(value="8"),
-            "nyquist_factor": tk.StringVar(value="5"),
+            "steps": tk.StringVar(value="5000"),
             "ls_method": tk.StringVar(value="auto"),
             "ls_normalization": tk.StringVar(value="standard"),
             "fap_method": tk.StringVar(value="baluev"),
@@ -1003,10 +997,15 @@ class PeriodAnalysisGUI:
             "aavso_observer": tk.StringVar(value=""),
             "aavso_start_date": tk.StringVar(value=(dt.date.today() - dt.timedelta(days=30)).isoformat()),
             "aavso_end_date": tk.StringVar(value=dt.date.today().isoformat()),
+            "aavso_all_dates": tk.BooleanVar(value=False),
             "aavso_limit": tk.StringVar(value="5000"),
         }
         self.df = None
         self.last_result = None
+        self.aavso_start_entry = None
+        self.aavso_start_button = None
+        self.aavso_end_entry = None
+        self.aavso_end_button = None
         self._build_ui()
         self._fit_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1102,19 +1101,17 @@ class PeriodAnalysisGUI:
         ttk.Label(controls, text="Max Period (days)").grid(row=2, column=2, sticky="e", **pad)
         ttk.Entry(controls, textvariable=self.vars["max_period"], width=18).grid(row=2, column=3, sticky="w", **pad)
 
-        ttk.Label(controls, text="Samples/Peak").grid(row=3, column=0, sticky="e", **pad)
-        ttk.Entry(controls, textvariable=self.vars["samples_per_peak"], width=18).grid(row=3, column=1, sticky="w", **pad)
-        ttk.Label(controls, text="Nyquist Factor").grid(row=3, column=2, sticky="e", **pad)
-        ttk.Entry(controls, textvariable=self.vars["nyquist_factor"], width=18).grid(row=3, column=3, sticky="w", **pad)
+        ttk.Label(controls, text="Steps").grid(row=3, column=0, sticky="e", **pad)
+        ttk.Entry(controls, textvariable=self.vars["steps"], width=18).grid(row=3, column=1, sticky="w", **pad)
 
-        ttk.Label(controls, text="LS Method").grid(row=4, column=0, sticky="e", **pad)
+        ttk.Label(controls, text="LS Method").grid(row=3, column=2, sticky="e", **pad)
         ttk.Combobox(
             controls,
             textvariable=self.vars["ls_method"],
             values=["auto", "fast", "slow", "cython", "chi2", "fastchi2"],
             width=16,
             state="readonly",
-        ).grid(row=4, column=1, sticky="w", **pad)
+        ).grid(row=3, column=3, sticky="w", **pad)
         ttk.Label(controls, text="Normalization").grid(row=4, column=2, sticky="e", **pad)
         ttk.Combobox(
             controls,
@@ -1124,14 +1121,14 @@ class PeriodAnalysisGUI:
             state="readonly",
         ).grid(row=4, column=3, sticky="w", **pad)
 
-        ttk.Label(controls, text="FAP Method").grid(row=5, column=0, sticky="e", **pad)
+        ttk.Label(controls, text="FAP Method").grid(row=4, column=0, sticky="e", **pad)
         ttk.Combobox(
             controls,
             textvariable=self.vars["fap_method"],
             values=["baluev", "davies", "naive", "bootstrap"],
             width=16,
             state="readonly",
-        ).grid(row=5, column=1, sticky="w", **pad)
+        ).grid(row=4, column=1, sticky="w", **pad)
         ttk.Label(controls, text="nterms").grid(row=5, column=2, sticky="e", **pad)
         ttk.Entry(controls, textvariable=self.vars["nterms"], width=18).grid(row=5, column=3, sticky="w", **pad)
 
@@ -1179,20 +1176,22 @@ class PeriodAnalysisGUI:
         ttk.Entry(online, textvariable=self.vars["aavso_observer"], width=12).grid(row=0, column=6, sticky="w", **opad)
 
         ttk.Label(online, text="Start date").grid(row=1, column=0, sticky="e", **opad)
-        ttk.Entry(online, textvariable=self.vars["aavso_start_date"], width=14, state="readonly").grid(
-            row=1, column=1, sticky="w", **opad
-        )
-        ttk.Button(online, text="Pick", command=lambda: self._pick_date("aavso_start_date")).grid(
-            row=1, column=2, sticky="w", **opad
-        )
+        self.aavso_start_entry = ttk.Entry(online, textvariable=self.vars["aavso_start_date"], width=14, state="readonly")
+        self.aavso_start_entry.grid(row=1, column=1, sticky="w", **opad)
+        self.aavso_start_button = ttk.Button(online, text="Pick", command=lambda: self._pick_date("aavso_start_date"))
+        self.aavso_start_button.grid(row=1, column=2, sticky="w", **opad)
 
         ttk.Label(online, text="End date").grid(row=1, column=3, sticky="e", **opad)
-        ttk.Entry(online, textvariable=self.vars["aavso_end_date"], width=14, state="readonly").grid(
-            row=1, column=4, sticky="w", **opad
-        )
-        ttk.Button(online, text="Pick", command=lambda: self._pick_date("aavso_end_date")).grid(
-            row=1, column=6, sticky="w", **opad
-        )
+        self.aavso_end_entry = ttk.Entry(online, textvariable=self.vars["aavso_end_date"], width=14, state="readonly")
+        self.aavso_end_entry.grid(row=1, column=4, sticky="w", **opad)
+        self.aavso_end_button = ttk.Button(online, text="Pick", command=lambda: self._pick_date("aavso_end_date"))
+        self.aavso_end_button.grid(row=1, column=6, sticky="w", **opad)
+        ttk.Checkbutton(
+            online,
+            text="All dates",
+            variable=self.vars["aavso_all_dates"],
+            command=self._toggle_aavso_date_controls,
+        ).grid(row=1, column=5, sticky="w", padx=8, pady=5)
 
         ttk.Label(online, text="Rows to fetch").grid(row=2, column=0, sticky="e", **opad)
         ttk.Entry(online, textvariable=self.vars["aavso_limit"], width=14).grid(row=2, column=1, sticky="w", **opad)
@@ -1203,6 +1202,7 @@ class PeriodAnalysisGUI:
             row=2, column=6, sticky="e", padx=8, pady=(8, 5)
         )
         online.columnconfigure(6, weight=1)
+        self._toggle_aavso_date_controls()
 
         self.summary_label = ttk.Label(
             outer,
@@ -1532,15 +1532,31 @@ class PeriodAnalysisGUI:
             return
         self.vars["aavso_filter"].set(",".join(dlg.result))
 
+    def _toggle_aavso_date_controls(self):
+        all_dates = bool(self.vars["aavso_all_dates"].get())
+        entry_state = "disabled" if all_dates else "readonly"
+        button_state = "disabled" if all_dates else "normal"
+        for widget in (self.aavso_start_entry, self.aavso_end_entry):
+            if widget is not None:
+                widget.configure(state=entry_state)
+        for widget in (self.aavso_start_button, self.aavso_end_button):
+            if widget is not None:
+                widget.configure(state=button_state)
+
     def _load_from_aavso(self):
         try:
             object_name = self.vars["aavso_object"].get().strip()
             if not object_name:
                 raise ValueError("AAVSO object is required.")
 
+            all_dates = bool(self.vars["aavso_all_dates"].get())
             start_date = self.vars["aavso_start_date"].get().strip()
             end_date = self.vars["aavso_end_date"].get().strip()
-            _utc_day_to_jd_bounds(start_date, end_date)
+            if all_dates:
+                start_date = ""
+                end_date = ""
+            else:
+                _utc_day_to_jd_bounds(start_date, end_date)
 
             row_limit = int(float(self.vars["aavso_limit"].get().strip()))
             if row_limit < 200:
@@ -1556,12 +1572,14 @@ class PeriodAnalysisGUI:
                 start_date=start_date,
                 end_date=end_date,
             )
-            jd_start, jd_end = _utc_day_to_jd_bounds(start_date, end_date)
-            rows_in_date = []
-            for row in rows:
-                jd = _to_float_or_none(row.get("jd", ""))
-                if jd is not None and jd_start <= jd < jd_end:
-                    rows_in_date.append(row)
+            rows_in_scope = rows
+            if start_date and end_date:
+                jd_start, jd_end = _utc_day_to_jd_bounds(start_date, end_date)
+                rows_in_scope = []
+                for row in rows:
+                    jd = _to_float_or_none(row.get("jd", ""))
+                    if jd is not None and jd_start <= jd < jd_end:
+                        rows_in_scope.append(row)
             df_online = build_df_from_aavso_rows(
                 rows=rows,
                 filt=selected_filter,
@@ -1571,17 +1589,18 @@ class PeriodAnalysisGUI:
                 object_name=object_name,
             )
             if df_online.empty:
-                bands = sorted({str(r.get("band", "")).strip().upper() for r in rows_in_date if str(r.get("band", "")).strip()})
+                bands = sorted({str(r.get("band", "")).strip().upper() for r in rows_in_scope if str(r.get("band", "")).strip()})
                 observers = sorted({
                     _normalize_observer_code(r.get("observer", ""))
-                    for r in rows_in_date
+                    for r in rows_in_scope
                     if _normalize_observer_code(r.get("observer", ""))
                 })
+                scope_label = "all dates" if all_dates else "selected date range"
                 raise ValueError(
-                    "No AAVSO rows matched the selected filters/date range.\n"
-                    f"Rows in date range: {len(rows_in_date)}\n"
-                    f"Available bands in range: {', '.join(bands) if bands else 'n/a'}\n"
-                    f"Available observers in range: {', '.join(observers[:20]) if observers else 'n/a'}"
+                    "No AAVSO rows matched the selected filters/scope.\n"
+                    f"Rows in scope ({scope_label}): {len(rows_in_scope)}\n"
+                    f"Available bands in scope: {', '.join(bands) if bands else 'n/a'}\n"
+                    f"Available observers in scope: {', '.join(observers[:20]) if observers else 'n/a'}"
                 )
 
             # AAVSO load overrides any existing file-loaded dataset.
@@ -1592,9 +1611,10 @@ class PeriodAnalysisGUI:
 
             self.vars["periodogram_filter"].set(filters[0] if filters else "ALL")
 
+            date_scope = "all dates" if all_dates else f"{start_date} to {end_date}"
             self.summary_label.config(
                 text=(
-                    f"Loaded {len(self.df)} rows from AAVSO for {object_name} ({start_date} to {end_date}). "
+                    f"Loaded {len(self.df)} rows from AAVSO for {object_name} ({date_scope}). "
                     f"JD span: {float(self.df['DATE'].min()):.5f} .. {float(self.df['DATE'].max()):.5f}"
                 )
             )
@@ -1658,8 +1678,7 @@ class PeriodAnalysisGUI:
 
             min_period = float(self.vars["min_period"].get().strip())
             max_period = float(self.vars["max_period"].get().strip())
-            spp = int(float(self.vars["samples_per_peak"].get().strip()))
-            nyquist_factor = float(self.vars["nyquist_factor"].get().strip())
+            steps = int(float(self.vars["steps"].get().strip()))
             nterms = int(float(self.vars["nterms"].get().strip()))
             fold_period_raw = self.vars["fold_period"].get().strip()
             fold_t0_raw = self.vars["fold_t0"].get().strip()
@@ -1669,10 +1688,8 @@ class PeriodAnalysisGUI:
                 raise ValueError("Period bounds must be positive.")
             if min_period >= max_period:
                 raise ValueError("Min period must be smaller than max period.")
-            if spp < 2:
-                raise ValueError("Samples/Peak should be at least 2.")
-            if nyquist_factor <= 0:
-                raise ValueError("Nyquist factor must be positive.")
+            if steps < 2:
+                raise ValueError("Steps must be at least 2.")
             if nterms < 1:
                 raise ValueError("nterms must be >= 1.")
             if fold_period is not None and fold_period <= 0:
@@ -1683,8 +1700,7 @@ class PeriodAnalysisGUI:
                 filt=selected_filter,
                 min_period=min_period,
                 max_period=max_period,
-                samples_per_peak=spp,
-                nyquist_factor=nyquist_factor,
+                steps=steps,
                 use_errors=bool(self.vars["use_errors"].get()),
                 exclude_limits=bool(self.vars["exclude_limits"].get()),
                 ls_method=self.vars["ls_method"].get().strip(),
