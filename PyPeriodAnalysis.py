@@ -1176,13 +1176,13 @@ class PeriodAnalysisGUI:
         ttk.Entry(online, textvariable=self.vars["aavso_observer"], width=12).grid(row=0, column=6, sticky="w", **opad)
 
         ttk.Label(online, text="Start date").grid(row=1, column=0, sticky="e", **opad)
-        self.aavso_start_entry = ttk.Entry(online, textvariable=self.vars["aavso_start_date"], width=14, state="readonly")
+        self.aavso_start_entry = ttk.Entry(online, textvariable=self.vars["aavso_start_date"], width=14)
         self.aavso_start_entry.grid(row=1, column=1, sticky="w", **opad)
         self.aavso_start_button = ttk.Button(online, text="Pick", command=lambda: self._pick_date("aavso_start_date"))
         self.aavso_start_button.grid(row=1, column=2, sticky="w", **opad)
 
         ttk.Label(online, text="End date").grid(row=1, column=3, sticky="e", **opad)
-        self.aavso_end_entry = ttk.Entry(online, textvariable=self.vars["aavso_end_date"], width=14, state="readonly")
+        self.aavso_end_entry = ttk.Entry(online, textvariable=self.vars["aavso_end_date"], width=14)
         self.aavso_end_entry.grid(row=1, column=4, sticky="w", **opad)
         self.aavso_end_button = ttk.Button(online, text="Pick", command=lambda: self._pick_date("aavso_end_date"))
         self.aavso_end_button.grid(row=1, column=6, sticky="w", **opad)
@@ -1534,7 +1534,7 @@ class PeriodAnalysisGUI:
 
     def _toggle_aavso_date_controls(self):
         all_dates = bool(self.vars["aavso_all_dates"].get())
-        entry_state = "disabled" if all_dates else "readonly"
+        entry_state = "disabled" if all_dates else "normal"
         button_state = "disabled" if all_dates else "normal"
         for widget in (self.aavso_start_entry, self.aavso_end_entry):
             if widget is not None:
