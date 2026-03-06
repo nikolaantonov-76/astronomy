@@ -668,9 +668,9 @@ def _apply_theme(root) -> None:
     except Exception:
         pass
 
-    base_font = ("Segoe UI", 10)
-    bold_font = ("Segoe UI", 10, "bold")
-    fixed_font = ("Consolas", 10)
+    base_font = ("Segoe UI", 12)
+    bold_font = ("Segoe UI", 12, "bold")
+    fixed_font = ("Consolas", 12)
     for fname in (
         "TkDefaultFont",
         "TkTextFont",

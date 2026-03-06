@@ -55,9 +55,9 @@ def _apply_theme(root) -> None:
         pass
 
     # 2. Reconfigure every named system font explicitly
-    _F  = ("Segoe UI", 10)
-    _FM = ("Segoe UI", 10, "bold")
-    _FC = ("Consolas", 10)
+    _F  = ("Segoe UI", 8)
+    _FM = ("Segoe UI", 8, "bold")
+    _FC = ("Consolas", 8)
     for fname in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
                   "TkHeadingFont", "TkCaptionFont", "TkTooltipFont"):
         try:
