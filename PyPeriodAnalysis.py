@@ -13,11 +13,13 @@ from __future__ import annotations
 import calendar
 import csv
 import datetime as dt
+import io
 import json
 import math
 import re
+import urllib.request
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote_plus, urlencode, urljoin
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -43,6 +45,8 @@ _BORDER = "#b8c8d8"
 _ACCENT = "#1f4d7a"
 _TEXT = "#2c3e50"
 AAVSO_WEBOBS_URL = "https://apps.aavso.org/webobs/results/"
+AAVSO_VSX_API_BASE = "https://vsx.aavso.org/index.php?view="
+AAVSO_VSX_OBJECT_URL = AAVSO_VSX_API_BASE + "api.object"
 
 # Approximate spectral-color mapping for common AAVSO filters.
 AAVSO_FILTER_COLORS = {
@@ -348,6 +352,138 @@ def _utc_day_to_jd_bounds(start_date: str, end_date: str):
     return float(start_ts.to_julian_date()), float(end_ts.to_julian_date())
 
 
+def _aavso_vsx_band_to_short(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    norm = re.sub(r"\s+", " ", re.sub(r"[._-]+", " ", raw.upper())).strip()
+    direct = {
+        "VIS": "VIS", "VISUAL": "VIS",
+        "U": "U", "JOHNSON U": "U",
+        "B": "B", "JOHNSON B": "B",
+        "V": "V", "JOHNSON V": "V",
+        "R": "R", "JOHNSON R": "R", "COUSINS R": "R", "RC": "R",
+        "I": "I", "JOHNSON I": "I", "COUSINS I": "I", "IC": "I",
+        "C": "C", "CLEAR": "C", "UNFILTERED": "C",
+        "CV": "CV", "CLEAR V": "CV",
+        "TG": "TG", "TB": "TB", "TR": "TR",
+        "SG": "SG", "SLOAN G": "SG", "G": "SG",
+        "SR": "SR", "SLOAN R": "SR",
+        "SI": "SI", "SLOAN I": "SI",
+        "SZ": "SZ", "SLOAN Z": "SZ", "Z": "SZ",
+        "HA": "HA", "HALPHA": "HA", "H ALPHA": "HA",
+        "OIII": "OIII",
+    }
+    if norm in direct:
+        return direct[norm]
+    squashed = re.sub(r"[^A-Z0-9]+", "", norm)
+    if squashed in AAVSO_FILTER_COLORS:
+        return squashed
+    tail = norm.split(" ")[-1].strip()
+    if tail in direct:
+        return direct[tail]
+    return squashed or raw.upper()
+
+
+def _aavso_vsx_api_url(
+    ident: str,
+    data_count: int,
+    page: int | None = None,
+    filt: str = "",
+    observer: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    include_csv: bool = False,
+) -> str:
+    filt_tokens = _parse_filter_selection(filt)
+    obs_norm = _normalize_observer_code(observer)
+    items = [("ident", str(ident).strip()), ("data", str(int(data_count)))]
+    if start_date and end_date:
+        jd_start, jd_end = _utc_day_to_jd_bounds(start_date, end_date)
+        items.append(("fromjd", f"{jd_start:.8f}"))
+        items.append(("tojd", f"{jd_end:.8f}"))
+    if filt_tokens:
+        items.append(("band", ",".join(filt_tokens)))
+    if obs_norm:
+        items.append(("obscode", obs_norm))
+    if page is not None:
+        items.append(("page", str(int(page))))
+    items.append(("mtype", "std"))
+    query = urlencode(items, quote_via=quote_plus)
+    if include_csv:
+        query += "&csv"
+    return f"{AAVSO_VSX_OBJECT_URL}&{query}"
+
+
+def _aavso_vsx_parse_xml_info(xml_text: str):
+    import xml.etree.ElementTree as ET
+
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", xml_text or "")
+    root = ET.fromstring(clean)
+    return {
+        "name": (root.findtext("Name") or "").strip(),
+        "auid": (root.findtext("AUID") or "").strip(),
+    }
+
+
+def _aavso_vsx_get_text(url: str, timeout: int = 120) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _aavso_vsx_extract_csv_payload(xml_text: str):
+    text = xml_text or ""
+    count_match = re.search(r"<Count>\s*(\d+)\s*</Count>", text, flags=re.I)
+    data_match = re.search(
+        r"<Data\b[^>]*><!\[CDATA\[(.*?)\]\]>(?:\s*<Count>\s*\d+\s*</Count>)?\s*</Data>",
+        text,
+        flags=re.I | re.S,
+    )
+    if not data_match:
+        data_match = re.search(r"<Data\b[^>]*>(.*?)</Data>", text, flags=re.I | re.S)
+    payload = data_match.group(1) if data_match else ""
+    payload = re.sub(r"<Count>\s*\d+\s*</Count>", "", payload, flags=re.I)
+    payload = payload.replace("<![CDATA[", "").replace("]]>", "")
+    payload = payload.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return payload, (int(count_match.group(1)) if count_match else None)
+
+
+def _aavso_vsx_rows_from_csv_payload(csv_payload: str):
+    payload = (csv_payload or "").strip()
+    if not payload:
+        return []
+    reader = csv.DictReader(io.StringIO(payload))
+    rows = []
+    for rec in reader:
+        jd = str(rec.get("JD", "") or rec.get("jd", "")).strip()
+        mag = str(rec.get("mag", "")).strip()
+        if not _is_jd_like(jd) or not _is_mag_like(mag):
+            continue
+        rows.append(
+            {
+                "date": jd,
+                "jd": jd,
+                "mag": mag,
+                "merr": str(rec.get("uncert", "") or rec.get("uncertainty", "")).strip(),
+                "band": _aavso_vsx_band_to_short(rec.get("band", "")),
+                "observer": str(rec.get("by", "") or rec.get("observer", "")).strip(),
+                "obsid": str(rec.get("obsID", "") or rec.get("obsid", "")).strip(),
+            }
+        )
+    return rows
+
+
 def fetch_aavso_rows(
     object_name: str,
     limit: int = 5000,
@@ -360,106 +496,90 @@ def fetch_aavso_rows(
     if not object_name:
         raise ValueError("Object name is required for AAVSO fetch.")
 
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-    }
-    page_size = 200
-    target_limit = max(200, int(limit))
-    obs_norm = _normalize_observer_code(observer)
-    filt_norm = (filt or "").strip().upper()
-    if filt_norm in {"ALL", "*"}:
-        filt_norm = ""
-    jd_start = -float("inf")
-    jd_end = float("inf")
-    if start_date and end_date:
+    full_fetch = True
+    try:
+        requested_limit = int(limit)
+    except Exception:
+        requested_limit = 0
+    target_limit = max(200, requested_limit) if requested_limit > 0 else 0
+    probe_size = 50
+    page_size = 50000 if full_fetch else min(1000, target_limit)
+
+    try:
+        info = _aavso_vsx_parse_xml_info(_aavso_vsx_get_text(_aavso_vsx_api_url(object_name, 0)))
+    except Exception as exc:
+        raise RuntimeError(f"Could not resolve '{object_name}' via AAVSO/VSX: {exc}")
+
+    ident = info.get("auid") or object_name
+    probe_url = _aavso_vsx_api_url(
+        ident,
+        probe_size,
+        page=1,
+        filt=filt,
+        observer=observer,
+        start_date=start_date,
+        end_date=end_date,
+        include_csv=True,
+    )
+    try:
+        probe_text = _aavso_vsx_get_text(probe_url)
+    except TimeoutError as exc:
+        raise RuntimeError("AAVSO/VSX request timeout.") from exc
+    except Exception as exc:
+        raise RuntimeError(f"AAVSO/VSX request failed: {exc}") from exc
+
+    probe_payload, total_count = _aavso_vsx_extract_csv_payload(probe_text)
+    probe_rows = _aavso_vsx_rows_from_csv_payload(probe_payload)
+    if not probe_rows:
+        raise RuntimeError(f"No AAVSO/VSX observations were returned for '{object_name}'.")
+
+    total_count = total_count or len(probe_rows)
+    last_page = max(1, (int(total_count) + page_size - 1) // page_size)
+
+    rows_agg = []
+    seen = set()
+    page_numbers = range(1, last_page + 1) if full_fetch else range(last_page, 0, -1)
+    for page_no in page_numbers:
+        page_url = _aavso_vsx_api_url(
+            ident,
+            page_size,
+            page=page_no,
+            filt=filt,
+            observer=observer,
+            start_date=start_date,
+            end_date=end_date,
+            include_csv=True,
+        )
         try:
-            jd_start, jd_end = _utc_day_to_jd_bounds(start_date, end_date)
-        except Exception:
-            jd_start, jd_end = -float("inf"), float("inf")
-
-    last_error = "No response from AAVSO."
-    for key_name in ("star", "target"):
-        try:
-            base_params = {key_name: object_name, "num_results": str(page_size)}
-            # IMPORTANT: WebObs uses obscode for observer filtering.
-            if obs_norm:
-                base_params["obscode"] = obs_norm
-            # Optional hint; we still filter locally to guarantee correctness.
-            if filt_norm:
-                base_params["band"] = filt_norm
-
-            rows_agg = []
-            seen = set()
-            max_pages = max(25, int(math.ceil(target_limit / page_size)) + 10)
-            repeated_signature_count = 0
-            last_signature = None
-
-            for page_no in range(1, max_pages + 1):
-                params = dict(base_params)
-                params["page"] = str(page_no)
-                resp = requests.get(AAVSO_WEBOBS_URL, params=params, timeout=(10, 40), headers=headers)
-                resp.raise_for_status()
-                rows_page = _extract_rows_from_html(resp.text)
-                if not rows_page:
-                    break
-
-                jd_values = []
-                for row in rows_page:
-                    jd = _to_float_or_none(row.get("jd", ""))
-                    if jd is not None:
-                        jd_values.append(jd)
-
-                if jd_values:
-                    sig = (round(min(jd_values), 6), round(max(jd_values), 6), len(jd_values))
-                    if sig == last_signature:
-                        repeated_signature_count += 1
-                    else:
-                        repeated_signature_count = 0
-                    last_signature = sig
-                    if repeated_signature_count >= 2:
-                        break
-
-                for row in rows_page:
-                    key = (
-                        str(row.get("jd", "")).strip(),
-                        str(row.get("mag", "")).strip(),
-                        str(row.get("merr", "")).strip(),
-                        str(row.get("band", "")).strip().upper(),
-                        _normalize_observer_code(row.get("observer", "")),
-                    )
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    rows_agg.append(row)
-
-                # Stop once we are already fully older than requested start date.
-                if jd_values and max(jd_values) < jd_start:
-                    break
-                if len(rows_agg) >= target_limit:
-                    break
-
-            if rows_agg:
-                rows_agg.sort(key=lambda item: float(item["jd"]))
-                # Keep only requested date interval here to avoid "latest-only" bias.
-                trimmed = []
-                for row in rows_agg:
-                    jd = _to_float_or_none(row.get("jd", ""))
-                    if jd is None:
-                        continue
-                    if jd_start <= jd < jd_end:
-                        trimmed.append(row)
-                return trimmed if trimmed else rows_agg[:target_limit]
-            last_error = "No rows parsed from AAVSO response."
-        except requests.exceptions.Timeout:
-            last_error = "AAVSO request timeout."
+            page_text = _aavso_vsx_get_text(page_url)
+        except TimeoutError as exc:
+            raise RuntimeError("AAVSO/VSX request timeout.") from exc
         except Exception as exc:
-            last_error = str(exc)
-    raise RuntimeError(f"Could not fetch AAVSO data: {last_error}")
+            raise RuntimeError(f"AAVSO/VSX request failed on page {page_no}: {exc}") from exc
+        payload, _ = _aavso_vsx_extract_csv_payload(page_text)
+        rows_page = _aavso_vsx_rows_from_csv_payload(payload)
+        if not rows_page:
+            continue
+        for row in rows_page:
+            key = row.get("obsid") or (
+                str(row.get("jd", "")).strip(),
+                str(row.get("mag", "")).strip(),
+                str(row.get("merr", "")).strip(),
+                str(row.get("band", "")).strip().upper(),
+                _normalize_observer_code(row.get("observer", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows_agg.append(row)
+        if not full_fetch and len(rows_agg) >= target_limit:
+            break
+
+    if not rows_agg:
+        raise RuntimeError(f"No AAVSO/VSX observations were returned for '{object_name}'.")
+
+    rows_agg.sort(key=lambda item: float(item["jd"]))
+    return rows_agg if full_fetch else rows_agg[-target_limit:]
 
 
 def build_df_from_aavso_rows(rows, filt: str, observer: str, start_date: str, end_date: str, object_name: str):
@@ -1157,7 +1277,7 @@ class PeriodAnalysisGUI:
 
         controls.columnconfigure(1, weight=1)
 
-        online = ttk.LabelFrame(outer, text="AAVSO Online Load (WebObs)", padding=10)
+        online = ttk.LabelFrame(outer, text="AAVSO Online Load (VSX/AID)", padding=10)
         online.pack(fill="x", pady=(8, 0))
         opad = {"padx": 8, "pady": 5}
 
@@ -1193,8 +1313,9 @@ class PeriodAnalysisGUI:
             command=self._toggle_aavso_date_controls,
         ).grid(row=1, column=5, sticky="w", padx=8, pady=5)
 
-        ttk.Label(online, text="Rows to fetch").grid(row=2, column=0, sticky="e", **opad)
-        ttk.Entry(online, textvariable=self.vars["aavso_limit"], width=14).grid(row=2, column=1, sticky="w", **opad)
+        ttk.Label(online, text="All matching rows are loaded automatically", foreground="#666666").grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=8, pady=5
+        )
         ttk.Label(online, text="Use Select... to choose multiple filters", foreground="#666666").grid(
             row=2, column=3, columnspan=3, sticky="w", padx=8, pady=5
         )
@@ -1558,15 +1679,11 @@ class PeriodAnalysisGUI:
             else:
                 _utc_day_to_jd_bounds(start_date, end_date)
 
-            row_limit = int(float(self.vars["aavso_limit"].get().strip()))
-            if row_limit < 200:
-                row_limit = 200
-
             selected_filter = self.vars["aavso_filter"].get().strip()
             selected_observer = self.vars["aavso_observer"].get().strip()
             rows = fetch_aavso_rows(
                 object_name=object_name,
-                limit=row_limit,
+                limit=0,
                 observer=selected_observer,
                 filt=selected_filter,
                 start_date=start_date,

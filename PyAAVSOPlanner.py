@@ -11,13 +11,17 @@ Email: nikola.antonov@iaps.institute
 """
 
 import datetime as dt
+import csv
 import html
+import io
 import json
 from pathlib import Path
 import queue
 import re
 import threading
+import urllib.request
 import zoneinfo
+from urllib.parse import quote_plus, urlencode
 
 import astropy.units as u
 import matplotlib.dates as mdates
@@ -119,6 +123,8 @@ _SESAME = [
 ]
 
 _AAVSO_WEBOBS_URL = "https://apps.aavso.org/webobs/results/"
+_AAVSO_VSX_API_BASE = "https://vsx.aavso.org/index.php?view="
+_AAVSO_VSX_OBJECT_URL = _AAVSO_VSX_API_BASE + "api.object"
 
 SETTINGS_FILE = Path("PyTimeAltitude.settings.json")
 # Prevent long blocking attempts to download IERS data in offline/limited networks.
@@ -226,6 +232,128 @@ def _to_float_or_none(value: str):
         return float(str(value).strip())
     except Exception:
         return None
+
+
+def _jd_to_utc_date_text(jd_value) -> str:
+    try:
+        jd_float = float(jd_value)
+        dt_value = dt.datetime(1970, 1, 1) + dt.timedelta(days=jd_float - 2440588.0)
+        return dt_value.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _normalize_observer_code(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "", str(value or "").upper())
+
+
+def _aavso_vsx_band_to_short(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    norm = re.sub(r"\s+", " ", re.sub(r"[._-]+", " ", raw.upper())).strip()
+    direct = {
+        "VIS": "VIS", "VISUAL": "VIS",
+        "U": "U", "JOHNSON U": "U",
+        "B": "B", "JOHNSON B": "B",
+        "V": "V", "JOHNSON V": "V",
+        "R": "R", "JOHNSON R": "R", "COUSINS R": "R", "RC": "R",
+        "I": "I", "JOHNSON I": "I", "COUSINS I": "I", "IC": "I",
+        "C": "C", "CLEAR": "C", "UNFILTERED": "C",
+        "CV": "CV", "CLEAR V": "CV",
+        "TG": "TG", "TB": "TB", "TR": "TR",
+        "SG": "SG", "SLOAN G": "SG", "G": "SG",
+        "SR": "SR", "SLOAN R": "SR",
+        "SI": "SI", "SLOAN I": "SI",
+        "SZ": "SZ", "SLOAN Z": "SZ", "Z": "SZ",
+        "HA": "HA", "HALPHA": "HA", "H ALPHA": "HA",
+        "OIII": "OIII",
+    }
+    if norm in direct:
+        return direct[norm]
+    squashed = re.sub(r"[^A-Z0-9]+", "", norm)
+    tail = norm.split(" ")[-1].strip()
+    if tail in direct:
+        return direct[tail]
+    return squashed or raw.upper()
+
+
+def _aavso_vsx_api_url(ident: str, data_count: int, page: int | None = None, include_csv: bool = False) -> str:
+    items = [("ident", str(ident).strip()), ("data", str(int(data_count))), ("mtype", "std")]
+    if page is not None:
+        items.append(("page", str(int(page))))
+    query = urlencode(items, quote_via=quote_plus)
+    if include_csv:
+        query += "&csv"
+    return f"{_AAVSO_VSX_OBJECT_URL}&{query}"
+
+
+def _aavso_vsx_parse_xml_info(xml_text: str):
+    import xml.etree.ElementTree as ET
+
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", xml_text or "")
+    root = ET.fromstring(clean)
+    return {
+        "name": (root.findtext("Name") or "").strip(),
+        "auid": (root.findtext("AUID") or "").strip(),
+    }
+
+
+def _aavso_vsx_get_text(url: str, timeout: int = 120) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _aavso_vsx_extract_csv_payload(xml_text: str):
+    text = xml_text or ""
+    count_match = re.search(r"<Count>\s*(\d+)\s*</Count>", text, flags=re.I)
+    data_match = re.search(
+        r"<Data\b[^>]*><!\[CDATA\[(.*?)\]\]>(?:\s*<Count>\s*\d+\s*</Count>)?\s*</Data>",
+        text,
+        flags=re.I | re.S,
+    )
+    if not data_match:
+        data_match = re.search(r"<Data\b[^>]*>(.*?)</Data>", text, flags=re.I | re.S)
+    payload = data_match.group(1) if data_match else ""
+    payload = re.sub(r"<Count>\s*\d+\s*</Count>", "", payload, flags=re.I)
+    payload = payload.replace("<![CDATA[", "").replace("]]>", "")
+    payload = payload.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return payload, (int(count_match.group(1)) if count_match else None)
+
+
+def _aavso_vsx_rows_from_csv_payload(csv_payload: str):
+    payload = (csv_payload or "").strip()
+    if not payload:
+        return []
+    reader = csv.DictReader(io.StringIO(payload))
+    rows = []
+    for rec in reader:
+        jd = str(rec.get("JD", "") or rec.get("jd", "")).strip()
+        mag = str(rec.get("mag", "")).strip()
+        if not _is_jd_like(jd) or not _has_magnitude_like_value(mag):
+            continue
+        rows.append(
+            {
+                "jd": jd,
+                "mag": mag,
+                "band": _aavso_vsx_band_to_short(rec.get("band", "")),
+                "observer": str(rec.get("by", "") or rec.get("observer", "")).strip(),
+                "date": _jd_to_utc_date_text(jd),
+                "obsid": str(rec.get("obsID", "") or rec.get("obsid", "")).strip(),
+            }
+        )
+    return rows
 
 
 def _has_magnitude_like_value(value: str) -> bool:
@@ -424,46 +552,58 @@ def _parse_webobs_rows(page_html: str):
 
 
 def fetch_latest_aavso_observations(object_name: str, limit: int = 5):
-    n = str(max(200, limit))
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-    }
-    # Try WebObs using both query parameter variants (star= and target=)
-    candidates = [
-        (_AAVSO_WEBOBS_URL, {"star": object_name, "num_results": n}),
-        (_AAVSO_WEBOBS_URL, {"target": object_name, "num_results": n}),
-    ]
-    last_error = "No response from AAVSO."
-    for url, params in candidates:
-        try:
-            response = requests.get(url, params=params, timeout=(8, 30), headers=headers)
-            response.raise_for_status()
-            rows = _parse_webobs_rows(response.text)
-            if rows:
-                unique_by_jd = {}
-                for row in rows:
-                    key = (
-                        row.get("jd", ""),
-                        str(row.get("mag", "")).strip(),
-                        str(row.get("observer", "")).strip(),
-                        str(row.get("band", "")).strip(),
-                    )
-                    unique_by_jd[key] = row
-                ordered = sorted(unique_by_jd.values(), key=lambda item: float(item["jd"]), reverse=True)
-                return ordered[:limit], None
-            last_error = f"No observations parsed from {url}"
-        except requests.exceptions.Timeout:
-            last_error = f"Timeout: {url}"
-            continue
-        except Exception as exc:
-            last_error = f"{url}: {exc}"
-            continue
-    return [], last_error
+    object_name = str(object_name or "").strip()
+    if not object_name:
+        return [], "Object name is required."
+
+    page_size = max(200, int(limit))
+    try:
+        info = _aavso_vsx_parse_xml_info(_aavso_vsx_get_text(_aavso_vsx_api_url(object_name, 0)))
+        ident = info.get("auid") or object_name
+    except Exception as exc:
+        return [], f"VSX resolve failed: {exc}"
+
+    try:
+        probe_text = _aavso_vsx_get_text(_aavso_vsx_api_url(ident, page_size, page=1, include_csv=True))
+        probe_payload, total_count = _aavso_vsx_extract_csv_payload(probe_text)
+        probe_rows = _aavso_vsx_rows_from_csv_payload(probe_payload)
+    except TimeoutError:
+        return [], "AAVSO/VSX request timeout."
+    except Exception as exc:
+        return [], f"AAVSO/VSX request failed: {exc}"
+
+    if not probe_rows:
+        return [], "No observations returned from AAVSO/VSX."
+
+    total_count = total_count or len(probe_rows)
+    last_page = max(1, (int(total_count) + page_size - 1) // page_size)
+
+    unique_rows = {}
+    for page_no in range(last_page, max(0, last_page - 3), -1):
+        if page_no == 1:
+            rows_page = probe_rows
+        else:
+            try:
+                page_text = _aavso_vsx_get_text(_aavso_vsx_api_url(ident, page_size, page=page_no, include_csv=True))
+                payload, _ = _aavso_vsx_extract_csv_payload(page_text)
+                rows_page = _aavso_vsx_rows_from_csv_payload(payload)
+            except TimeoutError:
+                return [], "AAVSO/VSX request timeout."
+            except Exception as exc:
+                return [], f"AAVSO/VSX page {page_no} failed: {exc}"
+        for row in rows_page:
+            key = row.get("obsid") or (
+                row.get("jd", ""),
+                str(row.get("mag", "")).strip(),
+                _normalize_observer_code(row.get("observer", "")),
+                str(row.get("band", "")).strip(),
+            )
+            unique_rows[key] = row
+        if len(unique_rows) >= limit:
+            break
+
+    ordered = sorted(unique_rows.values(), key=lambda item: float(item["jd"]), reverse=True)
+    return ordered[:limit], None
 
 
 class TimeAltitudeApp:
